@@ -244,6 +244,7 @@ class LLMDecoder:
         "llama":       ["q_proj", "v_proj"],
         "gemma3_text": ["q_proj", "v_proj"],
         "gemma3":      ["q_proj", "v_proj"],
+        "gemma4":      ["q_proj", "v_proj"],
         "qwen3":       ["q_proj", "v_proj"],
         # Fallback for unknown architectures
         "default":     ["q_proj", "v_proj"],
@@ -269,8 +270,14 @@ class LLMDecoder:
             model_name, torch_dtype=torch.float16, low_cpu_mem_usage=True,
         ).to(device)
 
-        self.llm_dim = self.model.config.hidden_size
-        self.model_type = getattr(self.model.config, "model_type", "unknown")
+        # hidden_size may be at top level or under text_config (multimodal models like Gemma-4)
+        cfg = self.model.config
+        self.llm_dim = getattr(cfg, "hidden_size", None)
+        if self.llm_dim is None and hasattr(cfg, "text_config"):
+            self.llm_dim = cfg.text_config.hidden_size
+        if self.llm_dim is None:
+            raise ValueError(f"Cannot determine hidden_size from {model_name} config")
+        self.model_type = getattr(cfg, "model_type", "unknown")
         self.word_embedding = self.model.get_input_embeddings()
         self.device = device
 
@@ -1262,7 +1269,10 @@ def main(args):
         # so that out_channels can be auto-detected per task (see below).
 
         # Multi-layer pooling and attention pooling
-        max_layers = llm_decoder.model.config.num_hidden_layers
+        _cfg = llm_decoder.model.config
+        max_layers = getattr(_cfg, "num_hidden_layers", None)
+        if max_layers is None and hasattr(_cfg, "text_config"):
+            max_layers = _cfg.text_config.num_hidden_layers
         effective_pool_layers = min(args.pool_layers, max_layers)
         if effective_pool_layers != args.pool_layers and accelerator.is_main_process:
             print(f"[Pool] pool_layers clamped: {args.pool_layers} → {effective_pool_layers} "
