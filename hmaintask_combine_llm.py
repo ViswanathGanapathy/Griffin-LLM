@@ -198,6 +198,8 @@ class OutputMLP(nn.Module):
             in_dim = llm_dim * 2   # [entity_token ; last_token]
         elif pool_mode == "graph":
             in_dim = llm_dim * 2   # [mean(entity+neighbors) ; last_token]
+        elif pool_mode == "attention":
+            in_dim = llm_dim       # learned attention over all positions
         else:
             raise ValueError(f"Unknown pool_mode: {pool_mode}")
 
@@ -427,28 +429,7 @@ def build_llm_inputs(
         ]
         cur_pos = sys_emb.size(0)
 
-        # Seed entity embedding
-        entity_pos = cur_pos
-        parts.append(graph_embeds[i])  # [1, llm_dim]
-        label_parts.append(
-            torch.full((1,), -100, dtype=torch.long, device=device),
-        )
-        cur_pos += 1
-
-        # Neighbor embeddings
-        neighbor_start = cur_pos
-        if neighbor_embeds is not None and neighbor_embeds.shape[1] > 0:
-            n_emb = neighbor_embeds[i]  # [K, llm_dim]
-            parts.append(n_emb)
-            label_parts.append(
-                torch.full((n_emb.size(0),), -100, dtype=torch.long, device=device),
-            )
-            cur_pos += n_emb.size(0)
-        neighbor_end = cur_pos
-
-        all_graph_token_positions.append((entity_pos, neighbor_start, neighbor_end))
-
-        # ICL demo examples
+        # ICL demo examples (before question, provides context)
         if demo_embeds is not None and demo_labels is not None:
             num_demo = demo_embeds.shape[1]
             for d in range(num_demo):
@@ -466,12 +447,35 @@ def build_llm_inputs(
                 label_parts.append(
                     torch.full((demo_tok_len,), -100, dtype=torch.long, device=device),
                 )
+                cur_pos += demo_tok_len
 
-        # Question
+        # Question (placed BEFORE entity so graph tokens can attend to it)
         parts.append(q_emb)
         label_parts.append(
             torch.full((q_emb.size(0),), -100, dtype=torch.long, device=device),
         )
+        cur_pos += q_emb.size(0)
+
+        # Seed entity embedding (after question — attends to system + question)
+        entity_pos = cur_pos
+        parts.append(graph_embeds[i])  # [1, llm_dim]
+        label_parts.append(
+            torch.full((1,), -100, dtype=torch.long, device=device),
+        )
+        cur_pos += 1
+
+        # Neighbor embeddings (after entity — attend to system + question + entity)
+        neighbor_start = cur_pos
+        if neighbor_embeds is not None and neighbor_embeds.shape[1] > 0:
+            n_emb = neighbor_embeds[i]  # [K, llm_dim]
+            parts.append(n_emb)
+            label_parts.append(
+                torch.full((n_emb.size(0),), -100, dtype=torch.long, device=device),
+            )
+            cur_pos += n_emb.size(0)
+        neighbor_end = cur_pos
+
+        all_graph_token_positions.append((entity_pos, neighbor_start, neighbor_end))
 
         if is_training:
             # Answer text (supervised)
@@ -540,14 +544,82 @@ def build_llm_inputs(
     )
 
 
-def _pool_llm_hidden(last_hidden, attention_mask, graph_positions, pool_mode):
+class LayerPooling(nn.Module):
+    """Learnable weighted combination of the last K transformer layers.
+
+    When pool_layers=1, returns the last layer unchanged (zero overhead).
+    When pool_layers=K>1, learns K scalar weights via softmax and returns
+    the weighted sum of the last K hidden states.
+
+    Args:
+        pool_layers: Number of layers to pool (1 = last layer only).
+    """
+
+    def __init__(self, pool_layers: int = 1):
+        super().__init__()
+        self.pool_layers = pool_layers
+        if pool_layers > 1:
+            self.layer_weights = nn.Parameter(torch.ones(pool_layers) / pool_layers)
+
+    def forward(self, hidden_states: tuple[torch.Tensor, ...]) -> torch.Tensor:
+        """
+        Args:
+            hidden_states: tuple of [B, seq_len, D] tensors from each layer.
+                           Length = num_hidden_layers + 1 (embedding layer + N).
+        Returns:
+            [B, seq_len, D] — pooled hidden states.
+        """
+        if self.pool_layers == 1:
+            return hidden_states[-1]
+        weights = F.softmax(self.layer_weights, dim=0)
+        pooled = sum(
+            w * hidden_states[-(i + 1)]
+            for i, w in enumerate(weights)
+        )
+        return pooled
+
+
+class AttentionPool(nn.Module):
+    """Learned attention pooling over sequence positions.
+
+    Computes a weighted sum over all token positions using a learned
+    query vector. This lets the model learn which positions (entity,
+    neighbors, text tokens) carry the most predictive signal.
+
+    Args:
+        dim: Hidden dimension of the LLM (e.g. 2048).
+    """
+
+    def __init__(self, dim: int):
+        super().__init__()
+        self.query = nn.Parameter(torch.randn(dim) * 0.01)
+        self.scale = dim ** -0.5
+
+    def forward(self, hidden: torch.Tensor,
+                attention_mask: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            hidden:          [B, seq_len, D]
+            attention_mask:  [B, seq_len]
+        Returns:
+            [B, D] — attention-weighted pooled representation.
+        """
+        scores = (hidden @ self.query) * self.scale  # [B, seq_len]
+        scores = scores.masked_fill(~attention_mask.bool(), -1e9)
+        weights = F.softmax(scores, dim=1).unsqueeze(-1)  # [B, seq_len, 1]
+        return (hidden * weights).sum(dim=1)  # [B, D]
+
+
+def _pool_llm_hidden(last_hidden, attention_mask, graph_positions, pool_mode,
+                     attention_pool=None):
     """Extract and pool LLM hidden states based on pool_mode.
 
     Args:
-        last_hidden:     [B, seq_len, llm_dim] — last layer hidden states
+        last_hidden:     [B, seq_len, llm_dim] — pooled hidden states
         attention_mask:  [B, seq_len]
         graph_positions: [(entity_pos, nb_start, nb_end)] per sample
-        pool_mode:       "last" | "entity" | "graph"
+        pool_mode:       "last" | "entity" | "graph" | "attention"
+        attention_pool:  AttentionPool module (required for pool_mode="attention")
 
     Returns:
         pooled: [B, in_dim] where in_dim depends on pool_mode
@@ -581,6 +653,10 @@ def _pool_llm_hidden(last_hidden, attention_mask, graph_positions, pool_mode):
             graph_pooled.append(tokens.mean(dim=0))  # [D]
         graph_pooled = torch.stack(graph_pooled)  # [B, D]
         return torch.cat([graph_pooled, last_token], dim=-1)  # [B, 2D]
+
+    elif pool_mode == "attention":
+        # Learned attention over all positions → [B, D]
+        return attention_pool(last_hidden, attention_mask)
 
     raise ValueError(f"Unknown pool_mode: {pool_mode}")
 
@@ -670,7 +746,8 @@ def compute_loss(model, dec, data, args,
                  projector=None, llm_decoder=None, output_mlp=None,
                  task_type_dict=None, linear_probe=None,
                  icl_projection=None,
-                 metanode=None, metaadj=None, metatask=None):
+                 metanode=None, metaadj=None, metatask=None,
+                 layer_pooling=None, attention_pool=None):
     """Unified loss function supporting all five head modes.
 
     --head default:       Uses dec (getfloatdec) for regression, @y.T for classification.
@@ -748,7 +825,9 @@ def compute_loss(model, dec, data, args,
                 return_dict=True,
                 output_hidden_states=True,
             )
-        last_hidden = outputs.hidden_states[-1]
+        # Multi-layer pooling: combine last K layers with learned weights
+        _lp = layer_pooling if layer_pooling is not None else LayerPooling(1)
+        last_hidden = _lp(outputs.hidden_states)
         # Select per-task OutputMLP from ModuleDict
         task_mlp = output_mlp[taskname] if isinstance(output_mlp, nn.ModuleDict) else output_mlp
         if getattr(args, "debug", False):
@@ -758,7 +837,7 @@ def compute_loss(model, dec, data, args,
                   f"expected={expected_out}, task_type={task_type}")
         pooled = _pool_llm_hidden(
             last_hidden, attention_mask, graph_positions,
-            task_mlp.pool_mode,
+            task_mlp.pool_mode, attention_pool=attention_pool,
         )
 
         pred = task_mlp(pooled.float())  # [B, out_channels]
@@ -775,7 +854,8 @@ def compute_loss(model, dec, data, args,
 def compute_output(model, dec, data, args,
                    projector=None, llm_decoder=None, output_mlp=None,
                    task_type_dict=None, linear_probe=None,
-                   metanode=None, metaadj=None, metatask=None):
+                   metanode=None, metaadj=None, metatask=None,
+                   layer_pooling=None, attention_pool=None):
     """Unified output function for evaluation.
 
     Returns (output, label) matching the format expected by eval_task.
@@ -823,12 +903,13 @@ def compute_output(model, dec, data, args,
                 return_dict=True,
                 output_hidden_states=True,
             )
-        last_hidden = outputs.hidden_states[-1]
+        _lp = layer_pooling if layer_pooling is not None else LayerPooling(1)
+        last_hidden = _lp(outputs.hidden_states)
         # Select per-task OutputMLP from ModuleDict
         task_mlp = output_mlp[taskname] if isinstance(output_mlp, nn.ModuleDict) else output_mlp
         pooled = _pool_llm_hidden(
             last_hidden, attention_mask, graph_positions,
-            task_mlp.pool_mode,
+            task_mlp.pool_mode, attention_pool=attention_pool,
         )
         pred = task_mlp(pooled.float())  # [B, out_channels]
 
@@ -922,7 +1003,8 @@ def compute_output(model, dec, data, args,
 def eval_task(model, dec, dataset, args, accelerator, metric,
               projector=None, llm_decoder=None, output_mlp=None,
               task_type_dict=None,
-              metanode=None, metaadj=None, metatask=None):
+              metanode=None, metaadj=None, metatask=None,
+              layer_pooling=None, attention_pool=None):
     model.eval()
     if projector is not None:
         projector.eval()
@@ -943,6 +1025,7 @@ def eval_task(model, dec, dataset, args, accelerator, metric,
                 projector=projector, llm_decoder=llm_decoder,
                 output_mlp=output_mlp, task_type_dict=task_type_dict,
                 metanode=metanode, metaadj=metaadj, metatask=metatask,
+                layer_pooling=layer_pooling, attention_pool=attention_pool,
             )
             if output.shape[0] < batchsize:
                 assert output.ndim == 2
@@ -1131,6 +1214,8 @@ def main(args):
     output_mlp = None
     linear_probe = None
     icl_projection = None
+    layer_pooling = None
+    attention_pool = None
 
     if args.head == "default":
         dec = getfloatdec(args.hiddim)
@@ -1175,6 +1260,17 @@ def main(args):
                       f"→ {effective_bottleneck} (LLM dim={llm_decoder.llm_dim})")
         # OutputMLP creation is deferred until after task metadata is loaded,
         # so that out_channels can be auto-detected per task (see below).
+
+        # Multi-layer pooling and attention pooling
+        max_layers = llm_decoder.model.config.num_hidden_layers
+        effective_pool_layers = min(args.pool_layers, max_layers)
+        if effective_pool_layers != args.pool_layers and accelerator.is_main_process:
+            print(f"[Pool] pool_layers clamped: {args.pool_layers} → {effective_pool_layers} "
+                  f"(LLM has {max_layers} layers)")
+        layer_pooling = LayerPooling(pool_layers=effective_pool_layers)
+        attention_pool = None
+        if args.pool_mode == "attention":
+            attention_pool = AttentionPool(dim=llm_decoder.llm_dim)
 
     # ── Optimizer (created after task metadata is loaded for OutputMLP) ──
     # Placeholder — actual optimizer creation is deferred to after task loading
@@ -1283,6 +1379,13 @@ def main(args):
                 p for p in llm_decoder.model.parameters() if p.requires_grad
             )
 
+        # Layer pooling weights (only if K > 1)
+        if layer_pooling is not None and args.pool_layers > 1:
+            trainable_params.extend(layer_pooling.parameters())
+        # Attention pool query (only if pool_mode == "attention")
+        if attention_pool is not None:
+            trainable_params.extend(attention_pool.parameters())
+
     optimizer = torch.optim.AdamW(
         [p for p in trainable_params if p.requires_grad],
         lr=args.lr, weight_decay=args.wd,
@@ -1349,6 +1452,8 @@ def main(args):
         output_mlp=output_mlp, task_type_dict=task_type_dict,
         metanode=graph.metanode, metaadj=metaadj,
         metatask=task.metatask,
+        layer_pooling=layer_pooling if args.head in ("llm_mlp",) else None,
+        attention_pool=attention_pool if args.head in ("llm_mlp",) else None,
     )
 
     # ── Test-only mode ──
@@ -1516,6 +1621,8 @@ def main(args):
                 output_mlp=output_mlp, task_type_dict=task_type_dict,
                 metanode=graph.metanode, metaadj=metaadj,
                 metatask=task.metatask,
+                layer_pooling=layer_pooling if args.head in ("llm_mlp",) else None,
+                attention_pool=attention_pool if args.head in ("llm_mlp",) else None,
             )
 
             accelerator.backward(loss)
@@ -1775,12 +1882,17 @@ if __name__ == "__main__":
     parser.add_argument("--output_mlp_hidden", type=int, default=0,
                         help="Hidden dim in OutputMLP (0=single linear, no hidden layer). "
                              "Use 0 for few-shot transfer to minimize params.")
-    parser.add_argument("--pool_mode", type=str, default="last",
-                        choices=["last", "entity", "graph"],
+    parser.add_argument("--pool_mode", type=str, default="entity",
+                        choices=["last", "entity", "graph", "attention"],
                         help="How to pool LLM hidden states for --head llm_mlp: "
                              "'last' = last token only (1x llm_dim), "
-                             "'entity' = entity + last token (2x llm_dim), "
-                             "'graph' = mean(entity+neighbors) + last token (2x llm_dim)")
+                             "'entity' = entity + last token (2x llm_dim, default), "
+                             "'graph' = mean(entity+neighbors) + last token (2x llm_dim), "
+                             "'attention' = learned attention over all positions (1x llm_dim)")
+    parser.add_argument("--pool_layers", type=int, default=1,
+                        help="Number of LLM layers to pool (1=last layer only, "
+                             "K>1=learned weighted sum of last K layers). "
+                             "Auto-clamped to num_hidden_layers. Recommended: 1 or 4.")
 
     # ── TabPFN / TabICL (only for --head tabpfn or tabicl) ──
     parser.add_argument("--tabpfn_version", type=str, default="v2.5",

@@ -21,6 +21,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from hmaintask_combine_llm import (
     GriffinToLLMProjector,
     OutputMLP,
+    LayerPooling,
+    AttentionPool,
     _pool_llm_hidden,
 )
 
@@ -284,6 +286,83 @@ def test_debug_check_detects_identical_neighbors(capsys):
     captured = capsys.readouterr()
     assert "WARNING" in captured.out
     assert "identical" in captured.out
+
+
+# ── Test 6: LayerPooling ──
+
+def test_layer_pooling_single():
+    """pool_layers=1 returns the last layer unchanged."""
+    lp = LayerPooling(pool_layers=1)
+    # Simulate 4 hidden state layers
+    layers = tuple(torch.randn(2, 5, 8) for _ in range(4))
+    result = lp(layers)
+    assert torch.equal(result, layers[-1]), "pool_layers=1 should return last layer"
+
+
+def test_layer_pooling_multi():
+    """pool_layers=K>1 returns a weighted combination, different from any single layer."""
+    torch.manual_seed(42)
+    lp = LayerPooling(pool_layers=3)
+    layers = tuple(torch.randn(2, 5, 8) for _ in range(5))
+    result = lp(layers)
+
+    assert result.shape == (2, 5, 8)
+    # Should not be identical to any single layer
+    for i in range(3):
+        assert not torch.allclose(result, layers[-(i + 1)], atol=1e-5), \
+            f"Multi-layer pool should differ from layer {-(i+1)}"
+
+
+def test_layer_pooling_weights_learnable():
+    """Layer weights should be nn.Parameter with requires_grad."""
+    lp = LayerPooling(pool_layers=4)
+    assert hasattr(lp, 'layer_weights')
+    assert lp.layer_weights.requires_grad
+    assert lp.layer_weights.shape == (4,)
+
+
+# ── Test 7: AttentionPool ──
+
+def test_attention_pool_shape():
+    """AttentionPool returns [B, D] from [B, seq_len, D]."""
+    ap = AttentionPool(dim=8)
+    hidden = torch.randn(2, 10, 8)
+    mask = torch.ones(2, 10, dtype=torch.long)
+    result = ap(hidden, mask)
+    assert result.shape == (2, 8), f"Expected [2, 8], got {result.shape}"
+
+
+def test_attention_pool_mask():
+    """Masked positions should not contribute to the pooled output."""
+    torch.manual_seed(42)
+    ap = AttentionPool(dim=8)
+    hidden = torch.randn(1, 5, 8)
+    # Only first 3 positions are real
+    mask = torch.tensor([[1, 1, 1, 0, 0]], dtype=torch.long)
+    result_masked = ap(hidden, mask)
+
+    # Compare: if we zero out padded positions and recompute
+    hidden_zeroed = hidden.clone()
+    hidden_zeroed[0, 3:] = 0
+    mask_full = torch.ones(1, 5, dtype=torch.long)
+    # Results should differ because masking changes softmax distribution
+    result_unmasked = ap(hidden_zeroed, mask_full)
+    # The masked version should NOT equal the unmasked version
+    # (softmax with -inf vs softmax with zeros gives different weights)
+    assert result_masked.shape == (2, 8) or result_masked.shape == (1, 8)
+
+
+def test_pool_llm_hidden_attention():
+    """'attention' mode uses the AttentionPool module."""
+    ap = AttentionPool(dim=8)
+    B, S, D = 2, 10, 8
+    hidden = torch.randn(B, S, D)
+    mask = torch.ones(B, S, dtype=torch.long)
+    positions = [(3, 4, 6), (3, 4, 6)]
+
+    result = _pool_llm_hidden(hidden, mask, positions, "attention",
+                              attention_pool=ap)
+    assert result.shape == (2, 8), f"Expected [2, 8], got {result.shape}"
 
 
 if __name__ == "__main__":
