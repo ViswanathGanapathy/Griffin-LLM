@@ -346,6 +346,7 @@ def build_llm_inputs(
     metatask: Optional[dict] = None,
     feature_names: Optional[list[str]] = None,
     neighbor_entity_types: Optional[list[str]] = None,
+    entity_after_question: bool = True,
 ):
     """Build input embeddings for the LLM.
 
@@ -436,51 +437,68 @@ def build_llm_inputs(
         ]
         cur_pos = sys_emb.size(0)
 
-        # ICL demo examples (before question, provides context)
-        if demo_embeds is not None and demo_labels is not None:
-            num_demo = demo_embeds.shape[1]
-            for d in range(num_demo):
-                # [demo_embed] -> [label_token] \n
-                parts.append(demo_embeds[i, d].unsqueeze(0))  # [1, llm_dim]
-                parts.append(demo_arrow_emb)
-                if task_type == "regression":
-                    dl_text = f"{demo_labels[i, d].item():.4f}"
-                else:
-                    dl_text = f"{demo_labels[i, d].item()}"
-                dl_ids = ld.tokenize(dl_text)
-                dl_emb = ld.embed_tokens(dl_ids)
-                parts.extend([dl_emb, demo_sep_emb])
-                demo_tok_len = 1 + demo_arrow_emb.size(0) + dl_emb.size(0) + demo_sep_emb.size(0)
-                label_parts.append(
-                    torch.full((demo_tok_len,), -100, dtype=torch.long, device=device),
-                )
-                cur_pos += demo_tok_len
+        # Helper: append ICL demo examples
+        def _append_demos():
+            nonlocal cur_pos
+            if demo_embeds is not None and demo_labels is not None:
+                num_demo = demo_embeds.shape[1]
+                for d in range(num_demo):
+                    parts.append(demo_embeds[i, d].unsqueeze(0))
+                    parts.append(demo_arrow_emb)
+                    if task_type == "regression":
+                        dl_text = f"{demo_labels[i, d].item():.4f}"
+                    else:
+                        dl_text = f"{demo_labels[i, d].item()}"
+                    dl_ids = ld.tokenize(dl_text)
+                    dl_emb = ld.embed_tokens(dl_ids)
+                    parts.extend([dl_emb, demo_sep_emb])
+                    demo_tok_len = 1 + demo_arrow_emb.size(0) + dl_emb.size(0) + demo_sep_emb.size(0)
+                    label_parts.append(
+                        torch.full((demo_tok_len,), -100, dtype=torch.long, device=device),
+                    )
+                    cur_pos += demo_tok_len
 
-        # Question (placed BEFORE entity so graph tokens can attend to it)
-        parts.append(q_emb)
-        label_parts.append(
-            torch.full((q_emb.size(0),), -100, dtype=torch.long, device=device),
-        )
-        cur_pos += q_emb.size(0)
-
-        # Seed entity embedding (after question — attends to system + question)
-        entity_pos = cur_pos
-        parts.append(graph_embeds[i])  # [1, llm_dim]
-        label_parts.append(
-            torch.full((1,), -100, dtype=torch.long, device=device),
-        )
-        cur_pos += 1
-
-        # Neighbor embeddings (after entity — attend to system + question + entity)
-        neighbor_start = cur_pos
-        if neighbor_embeds is not None and neighbor_embeds.shape[1] > 0:
-            n_emb = neighbor_embeds[i]  # [K, llm_dim]
-            parts.append(n_emb)
+        # Helper: append question
+        def _append_question():
+            nonlocal cur_pos
+            parts.append(q_emb)
             label_parts.append(
-                torch.full((n_emb.size(0),), -100, dtype=torch.long, device=device),
+                torch.full((q_emb.size(0),), -100, dtype=torch.long, device=device),
             )
-            cur_pos += n_emb.size(0)
-        neighbor_end = cur_pos
+            cur_pos += q_emb.size(0)
+
+        # Helper: append entity + neighbor embeddings
+        def _append_graph_tokens():
+            nonlocal cur_pos
+            nonlocal entity_pos, neighbor_start, neighbor_end
+            entity_pos = cur_pos
+            parts.append(graph_embeds[i])  # [1, llm_dim]
+            label_parts.append(
+                torch.full((1,), -100, dtype=torch.long, device=device),
+            )
+            cur_pos += 1
+            neighbor_start = cur_pos
+            if neighbor_embeds is not None and neighbor_embeds.shape[1] > 0:
+                n_emb = neighbor_embeds[i]  # [K, llm_dim]
+                parts.append(n_emb)
+                label_parts.append(
+                    torch.full((n_emb.size(0),), -100, dtype=torch.long, device=device),
+                )
+                cur_pos += n_emb.size(0)
+            neighbor_end = cur_pos
+
+        entity_pos = neighbor_start = neighbor_end = 0
+
+        if entity_after_question:
+            # New order: [system] [demos] [question] [ENTITY] [neighbors]
+            _append_demos()
+            _append_question()
+            _append_graph_tokens()
+        else:
+            # Old order: [system] [ENTITY] [neighbors] [demos] [question]
+            _append_graph_tokens()
+            _append_demos()
+            _append_question()
 
         all_graph_token_positions.append((entity_pos, neighbor_start, neighbor_end))
 
@@ -798,6 +816,7 @@ def compute_loss(model, dec, data, args,
         metanode=metanode, metaadj=metaadj, metatask=metatask,
         feature_names=feature_names,
         neighbor_entity_types=neighbor_entity_types,
+        entity_after_question=getattr(args, "entity_after_question", True),
     )
 
     if args.head == "llm":
@@ -894,6 +913,7 @@ def compute_output(model, dec, data, args,
         metanode=metanode, metaadj=metaadj, metatask=metatask,
         feature_names=feature_names,
         neighbor_entity_types=neighbor_entity_types,
+        entity_after_question=getattr(args, "entity_after_question", True),
     )
 
     if args.head == "llm_mlp":
@@ -1884,6 +1904,12 @@ if __name__ == "__main__":
                         help="Number of ICL demo examples (0=disabled)")
     parser.add_argument("--warmup_epochs", type=int, default=0,
                         help="Epochs to train projector only before unfreezing Griffin")
+    parser.add_argument("--entity_after_question", action="store_true", default=True,
+                        help="Place entity/neighbor tokens after question text (default). "
+                             "Use --no_entity_after_question for old order (entity before question).")
+    parser.add_argument("--no_entity_after_question", dest="entity_after_question",
+                        action="store_false",
+                        help="Place entity/neighbor tokens before question (old prompt order)")
 
     # ── Output MLP (only for --head llm_mlp) ──
     parser.add_argument("--output_mlp_dim", type=int, default=1,
