@@ -1341,11 +1341,42 @@ def main(args):
             tasknames = tasks_dict[tasknames[0]]
 
     if accelerator.is_main_process:
-        print(f"Tasks: {tasknames}")
+        print(f"Train tasks: {tasknames}")
+
+    # ── Resolve eval_tasks (for cross-dataset transfer) ──
+    def _resolve_task_keywords(task_list):
+        """Expand keywords like ALLTASK, others-1, etc. into task name lists."""
+        if len(task_list) == 1:
+            kw = task_list[0]
+            if kw == "ALLTASK":
+                return [tn for tn in task.metatask]
+            elif kw == "RETTASK":
+                return [tn for tn in task.metatask if task.metatask[tn]["task_type"] == "retrieval"]
+            elif kw == "REGTASK":
+                return [tn for tn in task.metatask if task.metatask[tn]["task_type"] == "regression"]
+            elif kw.startswith("EXCEPT__"):
+                return [tn for tn in task.metatask if tn != kw[len("EXCEPT__"):]]
+            elif kw in ["commerce-1", "commerce-2", "others-1", "others-2"]:
+                with open("task_names.yaml", "r") as f:
+                    tasks_dict = yaml.load(f, Loader=yaml.FullLoader)
+                return tasks_dict[kw]
+        return task_list
+
+    eval_tasknames = tasknames  # default: evaluate on same tasks as training
+    if args.eval_tasks is not None:
+        eval_tasknames = _resolve_task_keywords(args.eval_tasks)
+        if accelerator.is_main_process:
+            print(f"Eval tasks: {eval_tasknames}")
+    else:
+        if accelerator.is_main_process:
+            print(f"Eval tasks: (same as train)")
+
+    # All tasks that need type lookup and OutputMLPs
+    all_tasknames = list(dict.fromkeys(tasknames + eval_tasknames))  # deduplicated, ordered
 
     # Task type lookup (needed for LLM heads)
     task_type_dict = {}
-    for tn in tasknames:
+    for tn in all_tasknames:
         tt = task.metatask[tn].get("task_type", "regression")
         task_type_dict[tn] = tt
         if accelerator.is_main_process:
@@ -1354,7 +1385,7 @@ def main(args):
     # ── Deferred OutputMLP creation: auto-detect out_channels per task ──
     if args.head == "llm_mlp" and llm_decoder is not None:
         output_mlp_dict = nn.ModuleDict()
-        for tn in tasknames:
+        for tn in all_tasknames:
             if task_type_dict[tn] == "regression":
                 out_ch = 1
             else:
@@ -1426,13 +1457,13 @@ def main(args):
     dataset = construct_dataset(graph, task, tasknames, "train", args, floatembmodel)
     valid_dataset_dict = {
         tn: construct_dataset(graph, task, [tn], "valid", args, floatembmodel)
-        for tn in tasknames
+        for tn in eval_tasknames
     }
     test_dataset_dict = {
         tn: construct_dataset(graph, task, [tn], "test", args, floatembmodel)
-        for tn in tasknames
+        for tn in eval_tasknames
     }
-    metric_dict = {tn: task.metatask[tn]["metric"] for tn in tasknames}
+    metric_dict = {tn: task.metatask[tn]["metric"] for tn in eval_tasknames}
     best_valid_metric = -torch.inf
     best_checkpoint_path = None
     best_epoch = 0
@@ -1501,7 +1532,7 @@ def main(args):
             return
 
         test_metric = {}
-        for tn in tasknames:
+        for tn in eval_tasknames:
             if accelerator.is_main_process:
                 print(f"test {tn}...")
             test_metric[tn] = eval_task(
@@ -1693,7 +1724,7 @@ def main(args):
         # ── Validation ──
         if (epoch + 1) % args.eval_per_epoch == 0:
             eval_metric = {}
-            for tn in tasknames:
+            for tn in eval_tasknames:
                 if accelerator.is_main_process:
                     print(f"Validating {tn}...")
                 eval_metric[tn] = eval_task(
@@ -1728,7 +1759,7 @@ def main(args):
                 best_epoch = epoch
                 # Test on best validation
                 eval_metric = {}
-                for tn in tasknames:
+                for tn in eval_tasknames:
                     if accelerator.is_main_process:
                         print(f"test {tn}...")
                     eval_metric[tn] = eval_task(
@@ -1796,7 +1827,7 @@ def main(args):
                     osp.join(best_dir, "output_mlp.pt"),
                 )
 
-    for tn in tasknames:
+    for tn in eval_tasknames:
         if accelerator.is_main_process:
             print(f"Testing {tn}...")
         eval_metric = eval_task(
@@ -1839,7 +1870,12 @@ if __name__ == "__main__":
     parser.add_argument("logdir", type=str)
     parser.add_argument("logname", type=str)
     parser.add_argument("--tasks", type=str, nargs="+", default=["ALLTASK"],
-                        help="ALLTASK | RETTASK | REGTASK | task names")
+                        help="ALLTASK | RETTASK | REGTASK | task names (used for training)")
+    parser.add_argument("--eval_tasks", type=str, nargs="+", default=None,
+                        help="Tasks for validation/test (if different from --tasks). "
+                             "Supports same keywords as --tasks (ALLTASK, others-1, etc). "
+                             "When set, training uses --tasks but validation/test/early-stopping "
+                             "use --eval_tasks. Used for cross-dataset transfer experiments.")
     parser.add_argument("--savepath", type=str, default=None)
     parser.add_argument("--loadpath", type=str, default=None)
     parser.add_argument("--seed", type=int, default=42)
