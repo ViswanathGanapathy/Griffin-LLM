@@ -388,12 +388,14 @@ def build_rich_system_prompt(
                     lines.append(desc)
                     seen.add(desc)
 
-    # ── Section 4: Neighbor entity descriptions ──
+    # ── Section 4: Neighbor entity descriptions (1-hop) ──
+    one_hop_entities = set()
     if neighbor_entity_types:
         neighbor_descs = []
         for nt in neighbor_entity_types:
             if nt == root_entity:
                 continue
+            one_hop_entities.add(nt)
             nt_clean = _clean_entity_name(nt)
             nt_feats = metanode.get(nt, {}).get("feat", [])
             if nt_feats:
@@ -405,13 +407,44 @@ def build_rich_system_prompt(
                 neighbor_descs.append(f"  - {nt_clean}")
         if neighbor_descs:
             lines.append("")
-            lines.append("Connected entities in the subgraph:")
+            lines.append("Related tables and their key features:")
             lines.extend(neighbor_descs)
+
+    # ── Section 4b: Second-hop entity descriptions ──
+    # Discover entities connected to 1-hop neighbors via metaadj.
+    # These are encoded in the GNN embedding but not yet described.
+    two_hop_entities = set()
+    for one_hop in one_hop_entities:
+        oh_adj = metaadj.get(one_hop, {})
+        for edge in oh_adj.get("in", []) + oh_adj.get("out", []):
+            parts = edge.split(":")
+            if len(parts) >= 3:
+                src = parts[0].removeprefix("tail of ").removeprefix("head of ")
+                dst = parts[2]
+                for entity in (src, dst):
+                    if entity != root_entity and entity not in one_hop_entities:
+                        two_hop_entities.add(entity)
+
+    if two_hop_entities:
+        two_hop_descs = []
+        for th in sorted(two_hop_entities):
+            th_feats = metanode.get(th, {}).get("feat", [])
+            if not th_feats:
+                continue
+            th_clean = _clean_entity_name(th)
+            cols = ", ".join(_clean_feat_name(f) for f in th_feats[:6])
+            if len(th_feats) > 6:
+                cols += f", ... ({len(th_feats)} total)"
+            two_hop_descs.append(f"  - {th_clean}: [{cols}]")
+        if two_hop_descs:
+            lines.append("")
+            lines.append("Second-hop related tables:")
+            lines.extend(two_hop_descs)
 
     # ── Section 5: Embedding explanation ──
     lines.append("")
     lines.append(
-        "The following soft-token embeddings encode the entity's features "
+        "The following soft-token embeddings encode these features "
         "and relational neighborhood from a graph neural network. "
         "Use them alongside the schema description to make your prediction."
     )

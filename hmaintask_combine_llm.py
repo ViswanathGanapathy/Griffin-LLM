@@ -1343,11 +1343,10 @@ def main(args):
         msg += f"\n[Params] Trainable: {t_params:,}\n"
         print(msg)
 
-    # ── Eval-only keyword arguments ──
+    # ── Eval-only keyword arguments (eval_task signature) ──
     head_kwargs = dict(
         projector=projector, llm_decoder=llm_decoder,
         output_mlp=output_mlp, task_type_dict=task_type_dict,
-        linear_probe=linear_probe,
         metanode=graph.metanode, metaadj=metaadj,
         metatask=task.metatask,
     )
