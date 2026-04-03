@@ -235,7 +235,7 @@ def main(args):
                 avg_valid_metric = sum(eval_metric.values()) / len(eval_metric)
                 print(f"Average valid metric: {avg_valid_metric}", flush=True)
             # spread the metric to all processes
-            avg_valid_metric = accelerator.gather(torch.tensor([avg_valid_metric if accelerator.is_main_process else 0.0]).to(model.device)).mean().item()
+            avg_valid_metric = accelerator.gather(torch.tensor([avg_valid_metric if accelerator.is_main_process else 0.0]).to(accelerator.device)).mean().item()
             if avg_valid_metric > best_valid_metric:
                 best_valid_metric = avg_valid_metric
                 best_checkpoint_path = checkpoint_path

@@ -417,5 +417,103 @@ class LoaderWrapperTask(LoaderWrapper):
             mask = mask + [None] * len(fewshotnode)
 
         node, taskfeat, edge_attr, y = scalefeat(node, taskfeat, edge_attr, y)
-        
+
         return  node, mask, taskfeat, edge_index, edge_attr_type, edge_attr, label, y, mapping
+
+
+class LoaderWrapperTaskLLM(LoaderWrapperTask):
+    """Extended LoaderWrapperTask that additionally returns batch metadata
+    needed for LLM prompt construction:
+      - taskname: which task this batch belongs to
+      - rootnodetype: the entity type of seed nodes
+      - neighbor_mask: boolean mask over the unified node list marking
+        1-hop neighbors of seed nodes (for neighbor embedding injection)
+      - feature_names: list of visible feature names for the root entity
+      - neighbor_entity_types: list of entity types present in the subgraph
+
+    The returned tuple is:
+      (node, mask, taskfeat, edge_index, edge_attr_type, edge_attr,
+       label, y, mapping,
+       taskname, rootnodetype, neighbor_mask,
+       feature_names, neighbor_entity_types)
+    """
+
+    def __getitem__(self, idx: int):
+        tind = self.ind[idx]
+        taskname = self.lens[tind[0].item()][0]
+        tind = tind[1:]
+        tind = tind[tind >= 0]
+
+        is_regression = self.task.metatask[taskname]["task_type"] == "regression"
+
+        if is_regression:
+            rootnodetype, target_feat_mask, tind, label, tasktimestamp, tasknameemb, _ = self.task.get_regression(self.graph, taskname, self.split, tind)
+            y = None
+        else:
+            rootnodetype, target_feat_mask, tind, label, tasktimestamp, tasknameemb, (seed_type, num_class) = self.task.get_retrieval(self.graph, taskname, self.split, tind)
+            y = self.graph.nodes[seed_type].getfeat(range(num_class), self.subgraphargs["floatemb"])
+            assert y.shape[1] == 1
+            y = y.squeeze_(1)
+
+        node, adj, nodenameemb, edgenameemb, mapping = self.subgraph(rootnodetype, tind, tasktimestamp)
+
+        # Collect neighbor entity types from the subgraph before unification
+        neighbor_entity_types = [nt for nt in node.keys() if nt != rootnodetype]
+
+        node, edge_index, edge_attr_type, edge_attr = unifyheterograph(rootnodetype, node, nodenameemb, edgenameemb, adj)
+
+        taskfeat = [tasknameemb for i in range(len(node))]
+        mask = [None for i in range(len(node))]
+        mask[0] = torch.zeros(node[0][1].shape[:2], dtype=torch.bool)
+        mask[0][mapping] = torch.logical_not(target_feat_mask)
+
+        # Collect visible feature names for the root entity
+        all_feats = self.graph.metanode[rootnodetype].get("feat", [])
+        feature_names = [f for f, vis in zip(all_feats, target_feat_mask.tolist()) if vis]
+
+        # Build neighbor_mask: True for 1-hop neighbors of any seed node.
+        # In the unified graph, root node type is always index 0 in the
+        # node list (see unifyheterograph). Nodes at `mapping` are seeds.
+        # Their direct neighbors in edge_index are the 1-hop neighbors.
+        total_nodes = sum(n[1].shape[0] for n in node)
+        neighbor_mask = torch.zeros(total_nodes, dtype=torch.bool)
+        if edge_index is not None and edge_index.shape[1] > 0:
+            seed_set = set(mapping.tolist())
+            # edges where source is a seed node
+            src_is_seed = torch.tensor(
+                [s.item() in seed_set for s in edge_index[0]],
+                dtype=torch.bool,
+            )
+            neighbor_indices = edge_index[1][src_is_seed].unique()
+            # exclude the seed nodes themselves
+            non_seed = torch.tensor(
+                [n.item() not in seed_set for n in neighbor_indices],
+                dtype=torch.bool,
+            )
+            neighbor_indices = neighbor_indices[non_seed]
+            neighbor_mask[neighbor_indices] = True
+
+        if self.fewshotfanout > 0:
+            fewshot_center, tarnode = self.fewshotroot(rootnodetype, tind, mask[0][mapping], tasktimestamp)
+
+            fewshotnode, fewshotadj, fewshotnodenameemb, fewshotedgenameemb, fewshotmapping = self.fewshotsubgraph(rootnodetype, fewshot_center, None if tasktimestamp is None else tasktimestamp[tarnode])
+            fewshotnode, fewshotedge_index, fewshotedge_attr_type, fewshotedge_attr = unifyheterograph(rootnodetype, fewshotnode, fewshotnodenameemb, fewshotedgenameemb, fewshotadj)
+
+            node, edge_index, edge_attr_type, edge_attr = mergefewshotgraph(node, edge_index, edge_attr_type, edge_attr, fewshotnode, fewshotedge_index, fewshotedge_attr_type, fewshotedge_attr, tarnode, self.graph.edgenameemb["fewshot"])
+
+            taskfeat = taskfeat + [tasknameemb for i in range(len(fewshotnode))]
+            mask = mask + [None] * len(fewshotnode)
+
+            # Extend neighbor_mask for fewshot nodes (mark them as False)
+            fewshot_total = sum(n[1].shape[0] for n in fewshotnode)
+            neighbor_mask = torch.cat([
+                neighbor_mask,
+                torch.zeros(fewshot_total, dtype=torch.bool),
+            ])
+
+        node, taskfeat, edge_attr, y = scalefeat(node, taskfeat, edge_attr, y)
+
+        return (node, mask, taskfeat, edge_index, edge_attr_type, edge_attr,
+                label, y, mapping,
+                taskname, rootnodetype, neighbor_mask,
+                feature_names, neighbor_entity_types)
