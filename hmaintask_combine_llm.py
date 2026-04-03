@@ -854,7 +854,7 @@ def compute_loss(model, dec, data, args,
         # Multi-layer pooling: combine last K layers with learned weights
         _lp = layer_pooling if layer_pooling is not None else LayerPooling(1)
         last_hidden = _lp(outputs.hidden_states)
-        # Select per-task OutputMLP from ModuleDict
+        # Select OutputMLP: shared head or per-task from ModuleDict
         task_mlp = output_mlp[taskname] if isinstance(output_mlp, nn.ModuleDict) else output_mlp
         if getattr(args, "debug", False):
             expected_out = 1 if y is None else y.shape[0]
@@ -868,10 +868,12 @@ def compute_loss(model, dec, data, args,
 
         pred = task_mlp(pooled.float())  # [B, out_channels]
 
+        # Shared head: slice output to match task's target dimension
         if y is None:
-            loss = F.mse_loss(pred.flatten(), label.float().flatten())
+            loss = F.mse_loss(pred[:, 0], label.float())
         else:
-            loss = F.cross_entropy(pred, label)
+            num_classes = y.shape[0]
+            loss = F.cross_entropy(pred[:, :num_classes], label)
         return loss
 
     raise ValueError(f"Unknown head: {args.head}")
@@ -932,7 +934,7 @@ def compute_output(model, dec, data, args,
             )
         _lp = layer_pooling if layer_pooling is not None else LayerPooling(1)
         last_hidden = _lp(outputs.hidden_states)
-        # Select per-task OutputMLP from ModuleDict
+        # Select OutputMLP: shared head or per-task from ModuleDict
         task_mlp = output_mlp[taskname] if isinstance(output_mlp, nn.ModuleDict) else output_mlp
         pooled = _pool_llm_hidden(
             last_hidden, attention_mask, graph_positions,
@@ -940,10 +942,12 @@ def compute_output(model, dec, data, args,
         )
         pred = task_mlp(pooled.float())  # [B, out_channels]
 
+        # Shared head: slice output to match task's target dimension
         if y is None:
-            return pred, label  # [B, 1], [B]
+            return pred[:, :1], label  # [B, 1], [B]
         else:
-            return pred, label  # [B, num_classes], [B]
+            num_classes = y.shape[0]
+            return pred[:, :num_classes], label  # [B, num_classes], [B]
 
     elif args.head == "llm":
         inputs_embeds, attention_mask, _, _gp = build_llm_inputs(
@@ -1384,23 +1388,41 @@ def main(args):
 
     # ── Deferred OutputMLP creation: auto-detect out_channels per task ──
     if args.head == "llm_mlp" and llm_decoder is not None:
-        output_mlp_dict = nn.ModuleDict()
-        for tn in all_tasknames:
-            if task_type_dict[tn] == "regression":
-                out_ch = 1
-            else:
-                out_ch = task.metatask[tn].get("num_class", 2)
-            output_mlp_dict[tn] = OutputMLP(
+        if args.shared_head:
+            # Single shared head: out_channels = max(num_classes) across all tasks
+            max_classes = max(
+                task.metatask[tn].get("num_class", 2) if task_type_dict[tn] != "regression" else 1
+                for tn in all_tasknames
+            )
+            # Ensure at least 2 outputs (for binary classification)
+            max_classes = max(max_classes, 2)
+            output_mlp = OutputMLP(
                 llm_dim=llm_decoder.llm_dim,
-                out_channels=out_ch,
+                out_channels=max_classes,
                 hidden_dim=args.output_mlp_hidden if args.output_mlp_hidden > 0 else None,
                 dropout=0.1,
                 pool_mode=args.pool_mode,
             )
             if accelerator.is_main_process:
-                print(f"  OutputMLP[{tn}]: out_channels={out_ch}")
-        # For backward compatibility, set output_mlp to the dict
-        output_mlp = output_mlp_dict
+                print(f"  SharedOutputMLP: out_channels={max_classes}")
+        else:
+            # Per-task heads (default)
+            output_mlp_dict = nn.ModuleDict()
+            for tn in all_tasknames:
+                if task_type_dict[tn] == "regression":
+                    out_ch = 1
+                else:
+                    out_ch = task.metatask[tn].get("num_class", 2)
+                output_mlp_dict[tn] = OutputMLP(
+                    llm_dim=llm_decoder.llm_dim,
+                    out_channels=out_ch,
+                    hidden_dim=args.output_mlp_hidden if args.output_mlp_hidden > 0 else None,
+                    dropout=0.1,
+                    pool_mode=args.pool_mode,
+                )
+                if accelerator.is_main_process:
+                    print(f"  OutputMLP[{tn}]: out_channels={out_ch}")
+            output_mlp = output_mlp_dict
 
     # ── Optimizer (deferred from above so OutputMLP dict is available) ──
     trainable_params = []
@@ -1951,6 +1973,10 @@ if __name__ == "__main__":
     parser.add_argument("--output_mlp_dim", type=int, default=1,
                         help="Output dimension of MLP head (1 for regression, "
                              "num_classes for classification)")
+    parser.add_argument("--shared_head", action="store_true", default=False,
+                        help="Use single shared OutputMLP instead of per-task heads. "
+                             "out_channels = max(num_classes) across all tasks. "
+                             "Essential for transfer to unseen tasks via --eval_tasks.")
     parser.add_argument("--output_mlp_hidden", type=int, default=0,
                         help="Hidden dim in OutputMLP (0=single linear, no hidden layer). "
                              "Use 0 for few-shot transfer to minimize params.")
