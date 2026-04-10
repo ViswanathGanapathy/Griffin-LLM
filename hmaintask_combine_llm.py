@@ -267,7 +267,7 @@ class LLMDecoder:
                   f"'{self.tokenizer.eos_token}'")
 
         self.model = AutoModelForCausalLM.from_pretrained(
-            model_name, torch_dtype=torch.float16, low_cpu_mem_usage=True,
+            model_name, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True,
         ).to(device)
 
         # hidden_size may be at top level or under text_config (multimodal models like Gemma-4)
@@ -827,7 +827,7 @@ def compute_loss(model, dec, data, args,
             entity_type=rootnodetype, labels=label,
             **_meta_kwargs,
         )
-        with torch.cuda.amp.autocast(dtype=torch.float16):
+        with torch.cuda.amp.autocast(dtype=torch.bfloat16):
             outputs = llm_decoder.model(
                 inputs_embeds=inputs_embeds,
                 attention_mask=attention_mask,
@@ -844,7 +844,7 @@ def compute_loss(model, dec, data, args,
             entity_type=rootnodetype, labels=None,
             **_meta_kwargs,
         )
-        with torch.cuda.amp.autocast(dtype=torch.float16):
+        with torch.cuda.amp.autocast(dtype=torch.bfloat16):
             outputs = llm_decoder.model(
                 inputs_embeds=inputs_embeds,
                 attention_mask=attention_mask,
@@ -925,7 +925,7 @@ def compute_output(model, dec, data, args,
             entity_type=rootnodetype, labels=None,
             **_meta_kwargs,
         )
-        with torch.cuda.amp.autocast(dtype=torch.float16):
+        with torch.cuda.amp.autocast(dtype=torch.bfloat16):
             outputs = llm_decoder.model(
                 inputs_embeds=inputs_embeds,
                 attention_mask=attention_mask,
@@ -959,7 +959,7 @@ def compute_output(model, dec, data, args,
 
         # For binary classification: extract Yes/No logits directly
         if task_type == "retrieval" and y is not None and y.shape[0] == 2:
-            with torch.cuda.amp.autocast(dtype=torch.float16):
+            with torch.cuda.amp.autocast(dtype=torch.bfloat16):
                 outputs = llm_decoder.model(
                     inputs_embeds=inputs_embeds,
                     attention_mask=attention_mask,
@@ -984,7 +984,7 @@ def compute_output(model, dec, data, args,
         else:
             gen_kwargs.update(do_sample=False)
 
-        with torch.cuda.amp.autocast(dtype=torch.float16):
+        with torch.cuda.amp.autocast(dtype=torch.bfloat16):
             generated_ids = llm_decoder.model.generate(**gen_kwargs)
 
         if task_type == "regression" or y is None:
@@ -1667,7 +1667,7 @@ def main(args):
                     "lr": args.lr * 0.1,
                 })
             param_groups.append(
-                {"params": list(model.parameters()), "lr": args.lr * 0.5},
+                {"params": list(model.parameters()), "lr": args.lr * 0.1},
             )
             optimizer = torch.optim.AdamW(
                 param_groups, weight_decay=args.wd,
@@ -1714,7 +1714,7 @@ def main(args):
                 all_params = [p for p in trainable_params if p.requires_grad]
                 if projector is not None:
                     all_params.extend(projector.parameters())
-                torch.nn.utils.clip_grad_norm_(all_params, 1.0)
+                torch.nn.utils.clip_grad_norm_(all_params, 0.5)
 
             optimizer.step()
 
