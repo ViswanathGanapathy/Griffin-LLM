@@ -922,14 +922,17 @@ def compute_loss(model, dec, data, args,
         _lp = layer_pooling if layer_pooling is not None else LayerPooling(1)
         last_hidden = _lp(outputs.hidden_states)
         # Select OutputMLP: TaskTypeHeads, shared head, or per-task ModuleDict
-        task_mlp = output_mlp[taskname] if isinstance(output_mlp, nn.ModuleDict) else output_mlp
+        # Unwrap DDP wrapper if present (multi-GPU)
+        _mlp = getattr(output_mlp, 'module', output_mlp)
+        task_mlp = _mlp[taskname] if isinstance(_mlp, nn.ModuleDict) else output_mlp
+        _task_mlp_unwrapped = getattr(task_mlp, 'module', task_mlp)
         pooled = _pool_llm_hidden(
             last_hidden, attention_mask, graph_positions,
-            task_mlp.pool_mode, attention_pool=attention_pool,
+            _task_mlp_unwrapped.pool_mode, attention_pool=attention_pool,
         )
 
         num_classes = y.shape[0] if y is not None else None
-        if isinstance(task_mlp, TaskTypeHeads):
+        if isinstance(_task_mlp_unwrapped, TaskTypeHeads):
             pred = task_mlp(pooled.float(), num_classes=num_classes)
         else:
             pred = task_mlp(pooled.float())
@@ -1000,14 +1003,17 @@ def compute_output(model, dec, data, args,
         _lp = layer_pooling if layer_pooling is not None else LayerPooling(1)
         last_hidden = _lp(outputs.hidden_states)
         # Select OutputMLP: TaskTypeHeads, shared head, or per-task ModuleDict
-        task_mlp = output_mlp[taskname] if isinstance(output_mlp, nn.ModuleDict) else output_mlp
+        # Unwrap DDP wrapper if present (multi-GPU)
+        _mlp = getattr(output_mlp, 'module', output_mlp)
+        task_mlp = _mlp[taskname] if isinstance(_mlp, nn.ModuleDict) else output_mlp
+        _task_mlp_unwrapped = getattr(task_mlp, 'module', task_mlp)
         pooled = _pool_llm_hidden(
             last_hidden, attention_mask, graph_positions,
-            task_mlp.pool_mode, attention_pool=attention_pool,
+            _task_mlp_unwrapped.pool_mode, attention_pool=attention_pool,
         )
 
         num_classes = y.shape[0] if y is not None else None
-        if isinstance(task_mlp, TaskTypeHeads):
+        if isinstance(_task_mlp_unwrapped, TaskTypeHeads):
             pred = task_mlp(pooled.float(), num_classes=num_classes)
         else:
             pred = task_mlp(pooled.float())
