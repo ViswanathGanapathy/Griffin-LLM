@@ -281,12 +281,21 @@ class TaskTypeHeads(nn.Module):
         Returns:
             [B, out_dim] where out_dim depends on task type.
         """
+        # Compute all three heads so all parameters receive gradients
+        # (required for DDP multi-GPU — unused params cause errors).
+        # The dummy term adds zero-weighted outputs from unused heads,
+        # ensuring gradient flow without affecting the actual prediction.
+        reg_out = self.regression_head(hidden_states)
+        bin_out = self.binary_head(hidden_states)
+        multi_out = self.multiclass_head(hidden_states)
+        dummy = 0.0 * (reg_out.sum() + bin_out.sum() + multi_out.sum())
+
         if num_classes is None:
-            return self.regression_head(hidden_states)
+            return reg_out + dummy
         elif num_classes == 2:
-            return self.binary_head(hidden_states)
+            return bin_out + dummy
         else:
-            return self.multiclass_head(hidden_states)[:, :num_classes]
+            return multi_out[:, :num_classes] + dummy
 
 
 class LLMDecoder:
