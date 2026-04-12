@@ -222,6 +222,73 @@ class OutputMLP(nn.Module):
         return self.head(hidden_states)
 
 
+class TaskTypeHeads(nn.Module):
+    """Three separate heads for regression, binary classification, and multi-class.
+
+    Each task is routed to the appropriate head based on its output structure,
+    not its identity. This enables transfer to unseen tasks of the same type.
+
+    Routing:
+      - regression (y is None)     → regression_head → [B, 1]
+      - binary (num_classes == 2)  → binary_head     → [B, 2]
+      - multi-class (num_classes > 2) → multiclass_head → [B, num_classes]
+
+    The multi-class head has max_classes outputs. For tasks with fewer classes,
+    the output is sliced to [:num_classes].
+    """
+
+    def __init__(self, llm_dim: int, max_classes: int = 12,
+                 hidden_dim: int = None, dropout: float = 0.1,
+                 pool_mode: str = "entity"):
+        super().__init__()
+        self.pool_mode = pool_mode
+        self.max_classes = max_classes
+
+        if pool_mode == "last" or pool_mode == "attention":
+            in_dim = llm_dim
+        elif pool_mode in ("entity", "graph"):
+            in_dim = llm_dim * 2
+        else:
+            raise ValueError(f"Unknown pool_mode: {pool_mode}")
+
+        def _make_head(out_dim):
+            if hidden_dim is None:
+                return nn.Sequential(
+                    nn.LayerNorm(in_dim),
+                    nn.Linear(in_dim, out_dim),
+                )
+            else:
+                return nn.Sequential(
+                    nn.LayerNorm(in_dim),
+                    nn.Linear(in_dim, hidden_dim),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(hidden_dim, out_dim),
+                )
+
+        self.regression_head = _make_head(1)
+        self.binary_head = _make_head(2)
+        self.multiclass_head = _make_head(max_classes)
+
+    def forward(self, hidden_states: torch.Tensor,
+                num_classes: int = None) -> torch.Tensor:
+        """Route to appropriate head based on num_classes.
+
+        Args:
+            hidden_states: [B, in_dim] — already pooled by caller.
+            num_classes: None for regression, 2 for binary, >2 for multi-class.
+
+        Returns:
+            [B, out_dim] where out_dim depends on task type.
+        """
+        if num_classes is None:
+            return self.regression_head(hidden_states)
+        elif num_classes == 2:
+            return self.binary_head(hidden_states)
+        else:
+            return self.multiclass_head(hidden_states)[:, :num_classes]
+
+
 class LLMDecoder:
     """Wraps a HuggingFace causal LM + tokenizer.
 
@@ -854,25 +921,23 @@ def compute_loss(model, dec, data, args,
         # Multi-layer pooling: combine last K layers with learned weights
         _lp = layer_pooling if layer_pooling is not None else LayerPooling(1)
         last_hidden = _lp(outputs.hidden_states)
-        # Select OutputMLP: shared head or per-task from ModuleDict
+        # Select OutputMLP: TaskTypeHeads, shared head, or per-task ModuleDict
         task_mlp = output_mlp[taskname] if isinstance(output_mlp, nn.ModuleDict) else output_mlp
-        if getattr(args, "debug", False):
-            expected_out = 1 if y is None else y.shape[0]
-            actual_out = task_mlp.head[-1].out_features
-            print(f"[DEBUG] OutputMLP[{taskname}]: out_channels={actual_out}, "
-                  f"expected={expected_out}, task_type={task_type}")
         pooled = _pool_llm_hidden(
             last_hidden, attention_mask, graph_positions,
             task_mlp.pool_mode, attention_pool=attention_pool,
         )
 
-        pred = task_mlp(pooled.float())  # [B, out_channels]
+        num_classes = y.shape[0] if y is not None else None
+        if isinstance(task_mlp, TaskTypeHeads):
+            pred = task_mlp(pooled.float(), num_classes=num_classes)
+        else:
+            pred = task_mlp(pooled.float())
 
-        # Shared head: slice output to match task's target dimension
-        if y is None:
+        # Loss computation
+        if num_classes is None:
             loss = F.mse_loss(pred[:, 0], label.float())
         else:
-            num_classes = y.shape[0]
             loss = F.cross_entropy(pred[:, :num_classes], label)
         return loss
 
@@ -934,19 +999,22 @@ def compute_output(model, dec, data, args,
             )
         _lp = layer_pooling if layer_pooling is not None else LayerPooling(1)
         last_hidden = _lp(outputs.hidden_states)
-        # Select OutputMLP: shared head or per-task from ModuleDict
+        # Select OutputMLP: TaskTypeHeads, shared head, or per-task ModuleDict
         task_mlp = output_mlp[taskname] if isinstance(output_mlp, nn.ModuleDict) else output_mlp
         pooled = _pool_llm_hidden(
             last_hidden, attention_mask, graph_positions,
             task_mlp.pool_mode, attention_pool=attention_pool,
         )
-        pred = task_mlp(pooled.float())  # [B, out_channels]
 
-        # Shared head: slice output to match task's target dimension
-        if y is None:
+        num_classes = y.shape[0] if y is not None else None
+        if isinstance(task_mlp, TaskTypeHeads):
+            pred = task_mlp(pooled.float(), num_classes=num_classes)
+        else:
+            pred = task_mlp(pooled.float())
+
+        if num_classes is None:
             return pred[:, :1], label  # [B, 1], [B]
         else:
-            num_classes = y.shape[0]
             return pred[:, :num_classes], label  # [B, num_classes], [B]
 
     elif args.head == "llm":
@@ -1388,13 +1456,28 @@ def main(args):
 
     # ── Deferred OutputMLP creation: auto-detect out_channels per task ──
     if args.head == "llm_mlp" and llm_decoder is not None:
-        if args.shared_head:
+        if args.task_type_heads:
+            # Three per-task-type heads: regression / binary / multi-class
+            max_classes = max(
+                task.metatask[tn].get("num_class", 2) if task_type_dict[tn] != "regression" else 1
+                for tn in all_tasknames
+            )
+            max_classes = max(max_classes, 3)  # at least 3 for multi-class head
+            output_mlp = TaskTypeHeads(
+                llm_dim=llm_decoder.llm_dim,
+                max_classes=max_classes,
+                hidden_dim=args.output_mlp_hidden if args.output_mlp_hidden > 0 else None,
+                dropout=0.1,
+                pool_mode=args.pool_mode,
+            )
+            if accelerator.is_main_process:
+                print(f"  TaskTypeHeads: regression(1) + binary(2) + multiclass({max_classes})")
+        elif args.shared_head:
             # Single shared head: out_channels = max(num_classes) across all tasks
             max_classes = max(
                 task.metatask[tn].get("num_class", 2) if task_type_dict[tn] != "regression" else 1
                 for tn in all_tasknames
             )
-            # Ensure at least 2 outputs (for binary classification)
             max_classes = max(max_classes, 2)
             output_mlp = OutputMLP(
                 llm_dim=llm_decoder.llm_dim,
@@ -1977,6 +2060,11 @@ if __name__ == "__main__":
                         help="Use single shared OutputMLP instead of per-task heads. "
                              "out_channels = max(num_classes) across all tasks. "
                              "Essential for transfer to unseen tasks via --eval_tasks.")
+    parser.add_argument("--task_type_heads", action="store_true", default=False,
+                        help="Use 3 per-task-type heads (regression/binary/multi-class) "
+                             "instead of per-task heads. Each head is shared across tasks "
+                             "of the same output structure. Best for transfer with mixed "
+                             "task types. Overrides --shared_head.")
     parser.add_argument("--output_mlp_hidden", type=int, default=0,
                         help="Hidden dim in OutputMLP (0=single linear, no hidden layer). "
                              "Use 0 for few-shot transfer to minimize params.")
