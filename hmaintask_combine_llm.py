@@ -298,6 +298,64 @@ class TaskTypeHeads(nn.Module):
             return multi_out[:, :num_classes] + dummy
 
 
+class UnifiedDecoder(nn.Module):
+    """Griffin-style unified task decoder for the LLM pipeline.
+
+    Projects LLM pooled hidden states back to Griffin's embedding space,
+    then uses Griffin's original decoders:
+      - Regression: dec(back_projected) → scalar
+      - Classification: back_projected @ y.T → [B, K] logits
+
+    Classification requires no task-specific parameters — class embeddings
+    y come from the graph (embeddings of the K candidate entities).
+    Automatically handles any number of classes without retraining.
+
+    Based on Section 3.3 of the Griffin paper (arxiv:2505.05568).
+    """
+
+    def __init__(self, pool_dim: int, griffin_dim: int = 512,
+                 dropout: float = 0.1, pool_mode: str = "entity"):
+        super().__init__()
+        self.pool_mode = pool_mode
+        self.griffin_dim = griffin_dim
+
+        # Back-projection: LLM pool space → Griffin embedding space
+        self.back_proj = nn.Sequential(
+            nn.LayerNorm(pool_dim),
+            nn.Linear(pool_dim, griffin_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        )
+
+        # Regression decoder: same structure as Griffin's getfloatdec
+        self.reg_dec = nn.Sequential(
+            nn.LayerNorm(griffin_dim, elementwise_affine=False),
+            nn.Linear(griffin_dim, 1, bias=False),
+        )
+
+    def forward(self, hidden_states: torch.Tensor,
+                y: torch.Tensor = None) -> torch.Tensor:
+        """
+        Args:
+            hidden_states: [B, pool_dim] — pooled LLM hidden states.
+            y: [K, griffin_dim] class embeddings from graph, or None for regression.
+
+        Returns:
+            Regression (y is None): [B, 1] scalar predictions.
+            Classification (y given): [B, K] logits via dot product.
+        """
+        # Project back to Griffin embedding space
+        h = self.back_proj(hidden_states)  # [B, griffin_dim]
+
+        if y is None:
+            # Regression: learned linear decoder
+            return self.reg_dec(h)  # [B, 1]
+        else:
+            # Classification: similarity with class embeddings
+            # y: [K, griffin_dim] — embeddings of K candidate class entities
+            return h @ y.T  # [B, K]
+
+
 class LLMDecoder:
     """Wraps a HuggingFace causal LM + tokenizer.
 
@@ -941,7 +999,9 @@ def compute_loss(model, dec, data, args,
         )
 
         num_classes = y.shape[0] if y is not None else None
-        if isinstance(_task_mlp_unwrapped, TaskTypeHeads):
+        if isinstance(_task_mlp_unwrapped, UnifiedDecoder):
+            pred = task_mlp(pooled.float(), y=y)
+        elif isinstance(_task_mlp_unwrapped, TaskTypeHeads):
             pred = task_mlp(pooled.float(), num_classes=num_classes)
         else:
             pred = task_mlp(pooled.float())
@@ -1022,7 +1082,9 @@ def compute_output(model, dec, data, args,
         )
 
         num_classes = y.shape[0] if y is not None else None
-        if isinstance(_task_mlp_unwrapped, TaskTypeHeads):
+        if isinstance(_task_mlp_unwrapped, UnifiedDecoder):
+            pred = task_mlp(pooled.float(), y=y)
+        elif isinstance(_task_mlp_unwrapped, TaskTypeHeads):
             pred = task_mlp(pooled.float(), num_classes=num_classes)
         else:
             pred = task_mlp(pooled.float())
@@ -1471,7 +1533,22 @@ def main(args):
 
     # ── Deferred OutputMLP creation: auto-detect out_channels per task ──
     if args.head == "llm_mlp" and llm_decoder is not None:
-        if args.task_type_heads:
+        if args.unified_decoder:
+            # Griffin-style unified decoder: back-project to Griffin space
+            if args.pool_mode in ("last", "attention"):
+                pool_dim = llm_decoder.llm_dim
+            else:
+                pool_dim = llm_decoder.llm_dim * 2  # entity/graph mode
+            output_mlp = UnifiedDecoder(
+                pool_dim=pool_dim,
+                griffin_dim=args.hiddim,
+                dropout=0.1,
+                pool_mode=args.pool_mode,
+            )
+            if accelerator.is_main_process:
+                print(f"  UnifiedDecoder: pool_dim={pool_dim} → griffin_dim={args.hiddim} "
+                      f"(regression: dec, classification: @y.T)")
+        elif args.task_type_heads:
             # Three per-task-type heads: regression / binary / multi-class
             max_classes = max(
                 task.metatask[tn].get("num_class", 2) if task_type_dict[tn] != "regression" else 1
@@ -2169,6 +2246,12 @@ if __name__ == "__main__":
                              "instead of per-task heads. Each head is shared across tasks "
                              "of the same output structure. Best for transfer with mixed "
                              "task types. Overrides --shared_head.")
+    parser.add_argument("--unified_decoder", action="store_true", default=False,
+                        help="Use Griffin-style unified decoder: back-project LLM hidden "
+                             "states to Griffin embedding space, then use dec() for "
+                             "regression and @y.T for classification. No task-specific "
+                             "output heads — classification uses graph class embeddings. "
+                             "Overrides --shared_head and --task_type_heads.")
     parser.add_argument("--output_mlp_hidden", type=int, default=0,
                         help="Hidden dim in OutputMLP (0=single linear, no hidden layer). "
                              "Use 0 for few-shot transfer to minimize params.")
