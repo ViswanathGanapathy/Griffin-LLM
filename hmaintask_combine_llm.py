@@ -1734,26 +1734,36 @@ def main(args):
                 print(f"\n[Fine-tune] Per-task adaptation: {args.finetune_samples} "
                       f"samples/task, {args.finetune_epochs} epochs, lr={args.finetune_lr}")
 
-            # Freeze everything except output heads
+            # Freeze everything except output heads (and optionally projector)
             for p in model.parameters():
                 p.requires_grad = False
-            for p in projector.parameters():
-                p.requires_grad = False
+            if not args.finetune_projector:
+                for p in projector.parameters():
+                    p.requires_grad = False
             model.eval()
 
-            # Save original head state so we can reload between tasks
+            if accelerator.is_main_process and args.finetune_projector:
+                print(f"[Fine-tune] Also fine-tuning projector (lr={args.finetune_lr * 0.1:.1e})")
+
+            # Save original states so we can reload between tasks
             _mlp_unwrapped = getattr(output_mlp, 'module', output_mlp)
             original_head_state = {
                 k: v.clone() for k, v in _mlp_unwrapped.state_dict().items()
             }
+            _proj_unwrapped = getattr(projector, 'module', projector)
+            original_proj_state = {
+                k: v.clone() for k, v in _proj_unwrapped.state_dict().items()
+            } if args.finetune_projector else None
 
             test_metric = {}
             for tn in eval_tasknames:
                 if accelerator.is_main_process:
                     print(f"\n--- {tn} (type={task_type_dict[tn]}) ---")
 
-                # Reset heads to original checkpoint state before each task
+                # Reset to original checkpoint state before each task
                 _mlp_unwrapped.load_state_dict(original_head_state)
+                if args.finetune_projector:
+                    _proj_unwrapped.load_state_dict(original_proj_state)
 
                 # Build single-task fine-tuning dataset
                 ft_dataset = construct_dataset(
@@ -1761,8 +1771,14 @@ def main(args):
                 )
 
                 # Create fresh optimizer for this task
-                ft_params = list(output_mlp.parameters())
-                ft_optimizer = torch.optim.AdamW(ft_params, lr=args.finetune_lr)
+                ft_param_groups = [
+                    {"params": list(output_mlp.parameters()), "lr": args.finetune_lr},
+                ]
+                if args.finetune_projector:
+                    ft_param_groups.append(
+                        {"params": list(projector.parameters()), "lr": args.finetune_lr * 0.1},
+                    )
+                ft_optimizer = torch.optim.AdamW(ft_param_groups)
                 ft_optimizer = accelerator.prepare(ft_optimizer)
 
                 output_mlp.train()
@@ -1793,7 +1809,8 @@ def main(args):
                             attention_pool=attention_pool if args.head in ("llm_mlp",) else None,
                         )
                         accelerator.backward(loss)
-                        torch.nn.utils.clip_grad_norm_(ft_params, 0.5)
+                        all_ft_params = [p for pg in ft_param_groups for p in pg["params"]]
+                        torch.nn.utils.clip_grad_norm_(all_ft_params, 0.5)
                         ft_optimizer.step()
                         epoch_loss += loss.item()
                     if accelerator.is_main_process:
@@ -2298,6 +2315,9 @@ if __name__ == "__main__":
                         help="Number of fine-tuning epochs when --finetune_samples > 0")
     parser.add_argument("--finetune_lr", type=float, default=1e-3,
                         help="Learning rate for fine-tuning output heads")
+    parser.add_argument("--finetune_projector", action="store_true", default=False,
+                        help="Also fine-tune the projector during --finetune_samples "
+                             "(default: only output heads). Projector uses finetune_lr * 0.1.")
 
     args = parser.parse_args()
     args.eval_batchsize = (
