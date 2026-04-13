@@ -314,7 +314,8 @@ class UnifiedDecoder(nn.Module):
     """
 
     def __init__(self, pool_dim: int, griffin_dim: int = 512,
-                 dropout: float = 0.1, pool_mode: str = "entity"):
+                 dropout: float = 0.1, pool_mode: str = "entity",
+                 load_pretrained_dec: bool = True):
         super().__init__()
         self.pool_mode = pool_mode
         self.griffin_dim = griffin_dim
@@ -328,10 +329,20 @@ class UnifiedDecoder(nn.Module):
         )
 
         # Regression decoder: same structure as Griffin's getfloatdec
+        # Optionally load pretrained weights from floatdec-{dim}.pt
         self.reg_dec = nn.Sequential(
             nn.LayerNorm(griffin_dim, elementwise_affine=False),
             nn.Linear(griffin_dim, 1, bias=False),
         )
+        if load_pretrained_dec:
+            dec_path = f"floatdec-{griffin_dim}.pt"
+            if os.path.exists(dec_path):
+                self.reg_dec.load_state_dict(
+                    torch.load(dec_path, map_location="cpu", weights_only=True),
+                )
+                print(f"[UnifiedDecoder] Loaded pretrained regression decoder from {dec_path}")
+            else:
+                print(f"[UnifiedDecoder] {dec_path} not found — using random init")
 
     def forward(self, hidden_states: torch.Tensor,
                 y: torch.Tensor = None) -> torch.Tensor:
