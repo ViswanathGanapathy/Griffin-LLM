@@ -1651,6 +1651,68 @@ def main(args):
             accelerator.end_training()
             return
 
+        # ── Few-shot fine-tuning on eval tasks before testing ──
+        if args.finetune_samples > 0 and args.head in ("llm", "llm_mlp"):
+            if accelerator.is_main_process:
+                print(f"\n[Fine-tune] Adapting output heads on {args.finetune_samples} "
+                      f"samples/task for {args.finetune_epochs} epochs (lr={args.finetune_lr})")
+
+            # Freeze everything except output heads
+            for p in model.parameters():
+                p.requires_grad = False
+            for p in projector.parameters():
+                p.requires_grad = False
+
+            # Only train output heads
+            ft_params = list(output_mlp.parameters())
+            ft_optimizer = torch.optim.AdamW(ft_params, lr=args.finetune_lr)
+            ft_optimizer = accelerator.prepare(ft_optimizer)
+
+            # Build fine-tuning dataset from eval tasks with limited samples
+            ft_dataset = construct_dataset(
+                graph, task, eval_tasknames, "train", args, floatembmodel,
+            )
+
+            model.eval()  # Griffin in eval mode (frozen)
+            _mlp_unwrapped = getattr(output_mlp, 'module', output_mlp)
+            if hasattr(_mlp_unwrapped, 'train'):
+                output_mlp.train()
+
+            for ft_epoch in range(args.finetune_epochs):
+                ft_dataset.rebuild_indice_downsample_absolute(
+                    accelerator, args.finetune_samples, args.downsample_seed if args.downsample_seed else 42,
+                )
+                ft_loader = DataLoader(
+                    ft_dataset, shuffle=True, batch_size=1,
+                    collate_fn=lambda xlist: xlist[0],
+                    num_workers=4, persistent_workers=False,
+                )
+                ft_loader = accelerator.prepare(ft_loader)
+                ft_step = 0
+                for data in ft_loader:
+                    ft_step += 1
+                    ft_optimizer.zero_grad()
+                    loss = compute_loss(
+                        model, dec, data, args,
+                        projector=projector, llm_decoder=llm_decoder,
+                        output_mlp=output_mlp, task_type_dict=task_type_dict,
+                        metanode=graph.metanode, metaadj=metaadj,
+                        metatask=task.metatask,
+                        layer_pooling=layer_pooling if args.head in ("llm_mlp",) else None,
+                        attention_pool=attention_pool if args.head in ("llm_mlp",) else None,
+                    )
+                    accelerator.backward(loss)
+                    torch.nn.utils.clip_grad_norm_(ft_params, 0.5)
+                    ft_optimizer.step()
+                    if ft_step % 20 == 0 and accelerator.is_main_process:
+                        print(f"  [ft] epoch {ft_epoch} step {ft_step}: loss = {loss.item():.4f}")
+                if accelerator.is_main_process:
+                    print(f"  [ft] epoch {ft_epoch} done ({ft_step} steps)")
+                accelerator.wait_for_everyone()
+
+            if accelerator.is_main_process:
+                print(f"[Fine-tune] Complete. Evaluating on test set.\n")
+
         test_metric = {}
         for tn in eval_tasknames:
             if accelerator.is_main_process:
@@ -2117,6 +2179,15 @@ if __name__ == "__main__":
     parser.add_argument("--probe_epochs", type=int, default=0,
                         help="Epochs to fine-tune Griffin + projection with "
                              "linear probe before ICL evaluation (0=skip)")
+    parser.add_argument("--finetune_samples", type=int, default=0,
+                        help="Fine-tune output heads on N samples per eval task "
+                             "before testing. Used with --mode test to adapt "
+                             "a transfer checkpoint to target tasks. "
+                             "Only output heads are trained (Griffin/projector/LLM frozen).")
+    parser.add_argument("--finetune_epochs", type=int, default=5,
+                        help="Number of fine-tuning epochs when --finetune_samples > 0")
+    parser.add_argument("--finetune_lr", type=float, default=1e-3,
+                        help="Learning rate for fine-tuning output heads")
 
     args = parser.parse_args()
     args.eval_batchsize = (
