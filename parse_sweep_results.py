@@ -12,8 +12,11 @@ from collections import defaultdict
 
 
 N_PATTERN = re.compile(r"=== N=(\d+)")
+# Matches both formats:
+#   test_metric/<task>/<metric>: <val>   (full eval path)
+#   test_metric/<task>: <val>            (per-task fine-tune path)
 METRIC_PATTERN = re.compile(
-    r"test_metric/([\w\-]+)/([\w_]+):\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)"
+    r"test_metric/([\w\-]+)(?:/([\w_]+))?:\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)"
 )
 AVG_PATTERN = re.compile(r"Average test metric:\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)")
 
@@ -32,7 +35,9 @@ def parse_log(path):
                 continue
             m = METRIC_PATTERN.search(line)
             if m:
-                task, metric, val = m.group(1), m.group(2), float(m.group(3))
+                task = m.group(1)
+                metric = m.group(2) or ""  # empty if single-segment form
+                val = float(m.group(3))
                 results[current_n][task] = (metric, val)
                 continue
             m = AVG_PATTERN.search(line)
