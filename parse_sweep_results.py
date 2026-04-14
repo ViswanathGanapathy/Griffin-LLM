@@ -50,7 +50,7 @@ def format_table(results, label=""):
 
     # Header
     print(f"\n=== {label} ===")
-    header = ["task \\ N"] + [str(n) for n in Ns]
+    header = ["task \\ N"] + [str(n) for n in Ns] + ["best", "@N"]
     widths = [max(len(h), 10) for h in header]
     widths[0] = max(widths[0], max(len(t) for t in tasks + ["__avg__"]))
 
@@ -60,30 +60,62 @@ def format_table(results, label=""):
     print(row(header))
     print("-+-".join("-" * w for w in widths))
 
+    # Track best N per task for summary
+    best_per_task = {}
+
     for t in tasks:
         metric_name = next(
             (results[n][t][0] for n in Ns if t in results[n]), ""
         )
         label_cell = f"{t} ({metric_name})"
         cells = [label_cell]
+        task_vals = []  # (N, value)
         for n in Ns:
             if t in results[n]:
-                cells.append(f"{results[n][t][1]:.4f}")
+                v = results[n][t][1]
+                cells.append(f"{v:.4f}")
+                task_vals.append((n, v))
             else:
                 cells.append("—")
+        # All metrics are higher-is-better (regression metrics are pre-negated)
+        if task_vals:
+            best_n, best_v = max(task_vals, key=lambda x: x[1])
+            best_per_task[t] = (best_n, best_v)
+            cells.append(f"{best_v:.4f}")
+            cells.append(str(best_n))
+        else:
+            cells.extend(["—", "—"])
         # Adjust first-column width on the fly if task label is wider
         if len(label_cell) > widths[0]:
             widths[0] = len(label_cell)
         print(row(cells))
 
-    # Average row
+    # Average row (over the per-N averages reported in the log)
     cells = ["AVERAGE"]
+    avg_vals = []
     for n in Ns:
         if "__avg__" in results[n]:
-            cells.append(f"{results[n]['__avg__'][1]:.4f}")
+            v = results[n]["__avg__"][1]
+            cells.append(f"{v:.4f}")
+            avg_vals.append((n, v))
         else:
             cells.append("—")
+    if avg_vals:
+        best_n, best_v = max(avg_vals, key=lambda x: x[1])
+        cells.append(f"{best_v:.4f}")
+        cells.append(str(best_n))
+    else:
+        cells.extend(["—", "—"])
     print(row(cells))
+
+    # Oracle row: best-per-task picked independently, averaged
+    if best_per_task:
+        oracle_avg = sum(v for _, v in best_per_task.values()) / len(best_per_task)
+        print()
+        print(f"Oracle avg (best-N picked per-task): {oracle_avg:.4f}")
+        print("Best N per task:")
+        for t, (n, v) in best_per_task.items():
+            print(f"  {t:45s} N={n:<5d} {v:.4f}")
 
 
 def main():
