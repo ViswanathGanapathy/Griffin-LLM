@@ -30,6 +30,18 @@ others-2:
   - talkingdata-demo-pred
   - telstra-severity
 
+# Binary classification tasks (task_type: retrieval, num_class: 2)
+# Split designed for rel-trial hold-out transfer experiments.
+binary-source:
+  - rel-f1-driver-dnf
+  - rel-f1-driver-top3
+  - rel-hm-user-churn
+  - rel-avito-user-clicks
+  - rel-avito-user-visits
+
+binary-target:
+  - rel-trial-study-outcome
+
 single:
   - anime_planet-anime_planet-Rating_Score
   - babies_r_us-babies_r_us-price

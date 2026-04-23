@@ -1495,7 +1495,8 @@ def main(args):
         elif tasknames[0].startswith("EXCEPT__"):
             except_tn = tasknames[0][len("EXCEPT__"):]
             tasknames = [tn for tn in task.metatask if tn != except_tn]
-        elif tasknames[0] in ["commerce-1", "commerce-2", "others-1", "others-2"]:
+        elif tasknames[0] in ["commerce-1", "commerce-2", "others-1", "others-2",
+                               "binary-source", "binary-target"]:
             with open("task_names.yaml", "r") as f:
                 tasks_dict = yaml.load(f, Loader=yaml.FullLoader)
             tasknames = tasks_dict[tasknames[0]]
@@ -1516,7 +1517,8 @@ def main(args):
                 return [tn for tn in task.metatask if task.metatask[tn]["task_type"] == "regression"]
             elif kw.startswith("EXCEPT__"):
                 return [tn for tn in task.metatask if tn != kw[len("EXCEPT__"):]]
-            elif kw in ["commerce-1", "commerce-2", "others-1", "others-2"]:
+            elif kw in ["commerce-1", "commerce-2", "others-1", "others-2",
+                        "binary-source", "binary-target"]:
                 with open("task_names.yaml", "r") as f:
                     tasks_dict = yaml.load(f, Loader=yaml.FullLoader)
                 return tasks_dict[kw]
