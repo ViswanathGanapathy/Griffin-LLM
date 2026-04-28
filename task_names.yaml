@@ -64,6 +64,29 @@ rel-amazon-eval:
   - amazon-churn      # ≈ rel-amazon user-churn (binary)
   - amazon-rating     # regression on amazon entities (not exactly LTV but closest available)
 
+# Train on everything except rel-hm; test on rel-hm.
+# rel-event not in joint-v65 — would need dataset re-processing.
+# 13 tasks total: 7 binary classification, 6 regression.
+rel-train-no-hm:
+  - amazon-churn
+  - amazon-rating
+  - rel-avito-user-visits
+  - rel-avito-user-clicks
+  - rel-avito-ad-ctr
+  - rel-f1-driver-dnf
+  - rel-f1-driver-top3
+  - rel-f1-driver-position
+  - stackexchange-churn
+  - stackexchange-upvote
+  - rel-trial-study-outcome
+  - rel-trial-study-adverse
+  - rel-trial-site-success
+
+# rel-hm eval set (held out)
+rel-hm-eval:
+  - rel-hm-user-churn   # binary
+  - rel-hm-item-sales   # regression
+
 single:
   - anime_planet-anime_planet-Rating_Score
   - babies_r_us-babies_r_us-price

@@ -1497,7 +1497,8 @@ def main(args):
             tasknames = [tn for tn in task.metatask if tn != except_tn]
         elif tasknames[0] in ["commerce-1", "commerce-2", "others-1", "others-2",
                                "binary-source", "binary-target",
-                               "rel-train-broad", "rel-amazon-eval"]:
+                               "rel-train-broad", "rel-amazon-eval",
+                               "rel-train-no-hm", "rel-hm-eval"]:
             with open("task_names.yaml", "r") as f:
                 tasks_dict = yaml.load(f, Loader=yaml.FullLoader)
             tasknames = tasks_dict[tasknames[0]]
@@ -1520,7 +1521,8 @@ def main(args):
                 return [tn for tn in task.metatask if tn != kw[len("EXCEPT__"):]]
             elif kw in ["commerce-1", "commerce-2", "others-1", "others-2",
                         "binary-source", "binary-target",
-                        "rel-train-broad", "rel-amazon-eval"]:
+                        "rel-train-broad", "rel-amazon-eval",
+                        "rel-train-no-hm", "rel-hm-eval"]:
                 with open("task_names.yaml", "r") as f:
                     tasks_dict = yaml.load(f, Loader=yaml.FullLoader)
                 return tasks_dict[kw]
