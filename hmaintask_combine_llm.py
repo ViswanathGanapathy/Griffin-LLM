@@ -1498,7 +1498,10 @@ def main(args):
         elif tasknames[0] in ["commerce-1", "commerce-2", "others-1", "others-2",
                                "binary-source", "binary-target",
                                "rel-train-broad", "rel-amazon-eval",
-                               "rel-train-no-hm", "rel-hm-eval"]:
+                               "rel-train-no-hm", "rel-hm-eval",
+                               "rel-train-no-stack", "rel-stack-eval",
+                               "rel-train-no-f1", "rel-f1-eval",
+                               "rel-train-no-avito", "rel-avito-eval"]:
             with open("task_names.yaml", "r") as f:
                 tasks_dict = yaml.load(f, Loader=yaml.FullLoader)
             tasknames = tasks_dict[tasknames[0]]
@@ -1522,7 +1525,10 @@ def main(args):
             elif kw in ["commerce-1", "commerce-2", "others-1", "others-2",
                         "binary-source", "binary-target",
                         "rel-train-broad", "rel-amazon-eval",
-                        "rel-train-no-hm", "rel-hm-eval"]:
+                        "rel-train-no-hm", "rel-hm-eval",
+                        "rel-train-no-stack", "rel-stack-eval",
+                        "rel-train-no-f1", "rel-f1-eval",
+                        "rel-train-no-avito", "rel-avito-eval"]:
                 with open("task_names.yaml", "r") as f:
                     tasks_dict = yaml.load(f, Loader=yaml.FullLoader)
                 return tasks_dict[kw]

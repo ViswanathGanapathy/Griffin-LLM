@@ -87,6 +87,66 @@ rel-hm-eval:
   - rel-hm-user-churn   # binary
   - rel-hm-item-sales   # regression
 
+# Cross-validation matrix: each script holds out one rel-* dataset.
+# rel-event excluded throughout — not in joint-v65.
+
+# Holdout = rel-stack (train on all other rel-*, 13 tasks)
+rel-train-no-stack:
+  - amazon-churn
+  - amazon-rating
+  - rel-avito-user-visits
+  - rel-avito-user-clicks
+  - rel-avito-ad-ctr
+  - rel-f1-driver-dnf
+  - rel-f1-driver-top3
+  - rel-f1-driver-position
+  - rel-hm-user-churn
+  - rel-hm-item-sales
+  - rel-trial-study-outcome
+  - rel-trial-study-adverse
+  - rel-trial-site-success
+rel-stack-eval:
+  - stackexchange-churn
+  - stackexchange-upvote
+
+# Holdout = rel-f1 (train on all other rel-*, 12 tasks)
+rel-train-no-f1:
+  - amazon-churn
+  - amazon-rating
+  - rel-avito-user-visits
+  - rel-avito-user-clicks
+  - rel-avito-ad-ctr
+  - rel-hm-user-churn
+  - rel-hm-item-sales
+  - stackexchange-churn
+  - stackexchange-upvote
+  - rel-trial-study-outcome
+  - rel-trial-study-adverse
+  - rel-trial-site-success
+rel-f1-eval:
+  - rel-f1-driver-dnf
+  - rel-f1-driver-top3
+  - rel-f1-driver-position
+
+# Holdout = rel-avito (train on all other rel-*, 12 tasks)
+rel-train-no-avito:
+  - amazon-churn
+  - amazon-rating
+  - rel-f1-driver-dnf
+  - rel-f1-driver-top3
+  - rel-f1-driver-position
+  - rel-hm-user-churn
+  - rel-hm-item-sales
+  - stackexchange-churn
+  - stackexchange-upvote
+  - rel-trial-study-outcome
+  - rel-trial-study-adverse
+  - rel-trial-site-success
+rel-avito-eval:
+  - rel-avito-user-visits
+  - rel-avito-user-clicks
+  - rel-avito-ad-ctr
+
 single:
   - anime_planet-anime_planet-Rating_Score
   - babies_r_us-babies_r_us-price
