@@ -42,6 +42,28 @@ binary-source:
 binary-target:
   - rel-trial-study-outcome
 
+# Broad multi-domain training set: rel-avito + rel-f1 + rel-stack + rel-trial
+# (rel-event not present in joint-v65 — would need dataset re-processing)
+# 11 tasks total: 6 binary classification, 5 regression
+rel-train-broad:
+  - rel-avito-user-visits
+  - rel-avito-user-clicks
+  - rel-avito-ad-ctr
+  - rel-f1-driver-dnf
+  - rel-f1-driver-top3
+  - rel-f1-driver-position
+  - stackexchange-churn
+  - stackexchange-upvote
+  - rel-trial-study-outcome
+  - rel-trial-study-adverse
+  - rel-trial-site-success
+
+# rel-amazon eval set (only tasks present in joint-v65)
+# user-ltv, item-ltv, item-churn would require dataset re-processing
+rel-amazon-eval:
+  - amazon-churn      # ≈ rel-amazon user-churn (binary)
+  - amazon-rating     # regression on amazon entities (not exactly LTV but closest available)
+
 single:
   - anime_planet-anime_planet-Rating_Score
   - babies_r_us-babies_r_us-price
