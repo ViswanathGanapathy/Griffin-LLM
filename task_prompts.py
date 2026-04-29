@@ -29,12 +29,12 @@ TASK_DESCRIPTION = {
         "based on browsing behavior and product interactions."
     ),
     "seznam-charge": (
-        "Predict the monetary charge amount for a user on the advertising "
-        "platform based on their campaign and account data."
+        "Predict the charge bucket (8-class) a user falls into on the "
+        "advertising platform based on their campaign and account data."
     ),
     "seznam-prepay": (
-        "Predict the prepayment amount for a user on the advertising platform "
-        "based on historical billing and campaign data."
+        "Predict the prepayment bucket (8-class) for a user on the "
+        "advertising platform based on historical billing and campaign data."
     ),
 
     # ── commerce-2 ──
@@ -55,12 +55,12 @@ TASK_DESCRIPTION = {
         "classifieds platform based on ad content and user context."
     ),
     "rel-avito-user-clicks": (
-        "Predict the number of ad clicks a user will make on the classifieds "
-        "platform based on their browsing and search history."
+        "Predict whether a user will click on at least one ad in the upcoming "
+        "period based on their browsing and search history."
     ),
     "rel-avito-user-visits": (
-        "Predict the number of visits a user will make to the classifieds "
-        "platform based on their historical engagement patterns."
+        "Predict whether a user will visit the classifieds platform in the "
+        "upcoming period based on their historical engagement patterns."
     ),
 
     # ── others-1 ──
@@ -81,8 +81,8 @@ TASK_DESCRIPTION = {
         "based on their question, answer, and voting history."
     ),
     "stackexchange-upvote": (
-        "Predict the number of upvotes a StackExchange post will receive "
-        "based on the content quality signals and author reputation."
+        "Predict whether a StackExchange post will receive above-threshold "
+        "upvotes based on content quality signals and author reputation."
     ),
     "virus-wnv-pred": (
         "Predict the presence of West Nile Virus in a mosquito trap based on "
@@ -139,12 +139,12 @@ TASK_QUESTION = {
         "purchase? Answer Yes or No."
     ),
     "seznam-charge": (
-        "Based on the account and campaign data provided, what will be the "
-        "charge amount? Output a single number."
+        "Based on the account and campaign data provided, which charge bucket "
+        "does this user fall into? Output the class index."
     ),
     "seznam-prepay": (
-        "Based on the billing data provided, what will be the prepayment "
-        "amount? Output a single number."
+        "Based on the billing data provided, which prepayment bucket does "
+        "this user fall into? Output the class index."
     ),
 
     # ── commerce-2 ──
@@ -161,16 +161,16 @@ TASK_QUESTION = {
         "user click on this recommendation? Answer Yes or No."
     ),
     "rel-avito-ad-ctr": (
-        "Based on the ad and user context provided, will the user click on "
-        "this ad? Answer Yes or No."
+        "Based on the ad and user context provided, what is the predicted "
+        "click-through rate for this ad? Output a single number."
     ),
     "rel-avito-user-clicks": (
-        "Based on the user data provided, how many ad clicks will this user "
-        "make? Output a single number."
+        "Based on the user data provided, will this user click on at least "
+        "one ad in the next period? Answer Yes or No."
     ),
     "rel-avito-user-visits": (
-        "Based on the user data provided, how many visits will this user "
-        "make? Output a single number."
+        "Based on the user data provided, will this user visit the platform "
+        "in the next period? Answer Yes or No."
     ),
 
     # ── others-1 ──
@@ -192,8 +192,8 @@ TASK_QUESTION = {
         "inactive? Answer Yes or No."
     ),
     "stackexchange-upvote": (
-        "Based on the post and author data provided, how many upvotes will "
-        "this post receive? Output a single number."
+        "Based on the post and author data provided, will this post receive "
+        "above-threshold upvotes? Answer Yes or No."
     ),
     "virus-wnv-pred": (
         "Based on the trap location and environmental data provided, is West "
@@ -206,16 +206,16 @@ TASK_QUESTION = {
         "user book? Output the class index."
     ),
     "rel-trial-site-success": (
-        "Based on the trial site data provided, will this site successfully "
-        "complete enrollment? Answer Yes or No."
+        "Based on the trial site data provided, what is the predicted site "
+        "success score for enrollment completion? Output a single number."
     ),
     "rel-trial-study-adverse": (
         "Based on the study data provided, what will be the adverse event "
         "rate? Output a single number."
     ),
     "rel-trial-study-outcome": (
-        "Based on the study data provided, what will be the primary outcome "
-        "classification? Output the class index."
+        "Based on the study data provided, will this study achieve a "
+        "successful primary outcome? Answer Yes or No."
     ),
     "talkingdata-demo-pred": (
         "Based on the device and app usage data provided, what is the "
@@ -247,6 +247,43 @@ def get_task_question(task_name: str, task_type: str) -> str:
         return f"Based on the data provided for '{clean}', what is the predicted value? Output a single number."
     else:
         return f"Based on the data provided for '{clean}', what is the predicted class? Output the class index."
+
+
+def audit_task_prompts(metatask: dict, verbose: bool = True) -> list:
+    """Cross-check that each task's prompt format matches its metatask.yaml type.
+
+    For binary tasks (num_class==2) the question must end with "Yes or No".
+    For regression (num_class==1) it must say "Output a single number".
+    For multi-class (num_class>2) it must say "Output the class index".
+
+    Returns the list of mismatches; prints them when verbose=True.
+    Call this once at startup with the loaded metatask dict.
+    """
+    mismatches = []
+    for tn, meta in metatask.items():
+        if tn not in TASK_QUESTION:
+            continue
+        q = TASK_QUESTION[tn]
+        num_class = meta.get("num_class", 1)
+        task_type = meta.get("task_type", "regression")
+
+        if task_type == "regression" or num_class == 1:
+            expected = "single number"
+        elif num_class == 2:
+            expected = "yes or no"
+        else:
+            expected = "class index"
+
+        if expected not in q.lower():
+            mismatches.append((tn, num_class, task_type, expected, q))
+            if verbose:
+                print(f"[PROMPT AUDIT] MISMATCH on '{tn}': "
+                      f"num_class={num_class}, task_type={task_type}, "
+                      f"expected='{expected}' but question is:\n  {q}")
+
+    if verbose and not mismatches:
+        print("[PROMPT AUDIT] All task prompts match their metadata.")
+    return mismatches
 
 
 # ─────────────────────────────────────────────────────────────────────────────

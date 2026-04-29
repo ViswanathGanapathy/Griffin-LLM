@@ -80,7 +80,7 @@ import os
 import os.path as osp
 from typing import Union, Optional
 from metric import compute_metric
-from task_prompts import get_task_description, get_task_question, build_rich_system_prompt
+from task_prompts import get_task_description, get_task_question, build_rich_system_prompt, audit_task_prompts
 from tabular_heads import (
     TabPFNHead, TabICLHead, LinearProbe, ICLProjection,
     extract_embeddings, eval_with_icl_head,
@@ -1497,6 +1497,10 @@ def main(args):
     # ── Data loading ──
     graph = Graph(args.dataset)
     task = Task(args.dataset)
+
+    # Audit prompts vs task metadata once on rank 0
+    if accelerator.is_main_process:
+        audit_task_prompts(task.metatask, verbose=True)
 
     # Load adjacency metadata for rich LLM prompts
     _metaadj_path = osp.join(args.dataset, "metaadj.yaml")
