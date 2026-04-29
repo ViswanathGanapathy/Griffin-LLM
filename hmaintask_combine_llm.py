@@ -1778,6 +1778,16 @@ def main(args):
                 k: v.clone() for k, v in _proj_unwrapped.state_dict().items()
             } if args.finetune_projector else None
 
+            # Snapshot LoRA params (only the trainable adapters, not base LLM)
+            original_lora_state = None
+            if args.finetune_lora and args.use_lora:
+                _llm_unwrapped = getattr(llm_decoder.model, 'module', llm_decoder.model)
+                original_lora_state = {
+                    n: p.detach().clone()
+                    for n, p in _llm_unwrapped.named_parameters()
+                    if p.requires_grad
+                }
+
             test_metric = {}
             for tn in eval_tasknames:
                 if accelerator.is_main_process:
@@ -1787,6 +1797,12 @@ def main(args):
                 _mlp_unwrapped.load_state_dict(original_head_state)
                 if args.finetune_projector:
                     _proj_unwrapped.load_state_dict(original_proj_state)
+                if original_lora_state is not None:
+                    _llm_unwrapped = getattr(llm_decoder.model, 'module', llm_decoder.model)
+                    with torch.no_grad():
+                        for n, p in _llm_unwrapped.named_parameters():
+                            if n in original_lora_state:
+                                p.copy_(original_lora_state[n])
 
                 # Build single-task fine-tuning dataset
                 ft_dataset = construct_dataset(
@@ -1801,6 +1817,21 @@ def main(args):
                     ft_param_groups.append(
                         {"params": list(projector.parameters()), "lr": args.finetune_lr * 0.1},
                     )
+                if args.finetune_lora and args.use_lora:
+                    # Unfreeze LoRA params (base LLM stays frozen)
+                    lora_params = [
+                        p for p in llm_decoder.model.parameters()
+                        # LoRA params have requires_grad=True after get_peft_model;
+                        # base params have requires_grad=False
+                        if p.requires_grad
+                    ]
+                    if lora_params:
+                        ft_param_groups.append(
+                            {"params": lora_params, "lr": args.finetune_lr * 0.1},
+                        )
+                        if accelerator.is_main_process and tn == eval_tasknames[0]:
+                            n_lora = sum(p.numel() for p in lora_params)
+                            print(f"[Fine-tune] LoRA enabled: {n_lora:,} params at lr={args.finetune_lr * 0.1:.1e}")
                 ft_optimizer = torch.optim.AdamW(ft_param_groups)
                 ft_optimizer = accelerator.prepare(ft_optimizer)
 
@@ -2341,6 +2372,11 @@ if __name__ == "__main__":
     parser.add_argument("--finetune_projector", action="store_true", default=False,
                         help="Also fine-tune the projector during --finetune_samples "
                              "(default: only output heads). Projector uses finetune_lr * 0.1.")
+    parser.add_argument("--finetune_lora", action="store_true", default=False,
+                        help="Also fine-tune LoRA adapters on the LLM during "
+                             "--finetune_samples. Requires --use_lora to be set "
+                             "so LoRA adapters exist on the LLM. LoRA uses "
+                             "finetune_lr * 0.1.")
 
     args = parser.parse_args()
     args.eval_batchsize = (
