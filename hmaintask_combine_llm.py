@@ -143,6 +143,28 @@ def debug_check_neighbors(
           f"{zero_counts} / {K}")
 
 
+def focal_cross_entropy(logits: torch.Tensor, target: torch.Tensor,
+                        gamma: float = 2.0, alpha: float = None) -> torch.Tensor:
+    """Multi-class focal loss (Lin et al. 2017).
+
+    loss_i = -alpha_i * (1 - p_i)^gamma * log(p_i)
+    where p_i is the softmax probability of the true class for example i.
+
+    When gamma=0 this reduces to standard cross-entropy.
+    When alpha is None, no class re-weighting is applied (pure focal).
+    """
+    log_probs = F.log_softmax(logits, dim=-1)
+    log_pt = log_probs.gather(1, target.unsqueeze(1)).squeeze(1)
+    pt = log_pt.exp()
+    focal_term = (1.0 - pt) ** gamma
+    loss = -focal_term * log_pt
+    if alpha is not None:
+        # alpha is a tensor [num_classes]; index by target
+        alpha_t = alpha[target]
+        loss = alpha_t * loss
+    return loss.mean()
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # LLM Components
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1021,7 +1043,13 @@ def compute_loss(model, dec, data, args,
         if num_classes is None:
             loss = F.mse_loss(pred[:, 0], label.float())
         else:
-            loss = F.cross_entropy(pred[:, :num_classes], label)
+            if getattr(args, "focal_loss", False) and num_classes == 2:
+                loss = focal_cross_entropy(
+                    pred[:, :num_classes], label,
+                    gamma=getattr(args, "focal_gamma", 2.0),
+                )
+            else:
+                loss = F.cross_entropy(pred[:, :num_classes], label)
         return loss
 
     raise ValueError(f"Unknown head: {args.head}")
@@ -2377,6 +2405,12 @@ if __name__ == "__main__":
                              "--finetune_samples. Requires --use_lora to be set "
                              "so LoRA adapters exist on the LLM. LoRA uses "
                              "finetune_lr * 0.1.")
+    parser.add_argument("--focal_loss", action="store_true", default=False,
+                        help="Use focal loss for binary classification tasks "
+                             "(num_class==2). Helps when class imbalance is severe. "
+                             "Has no effect on regression or multiclass losses.")
+    parser.add_argument("--focal_gamma", type=float, default=2.0,
+                        help="Gamma for focal loss; gamma=0 reduces to cross-entropy.")
 
     args = parser.parse_args()
     args.eval_batchsize = (
