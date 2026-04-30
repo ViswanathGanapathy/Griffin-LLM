@@ -11,7 +11,10 @@ import sys
 from collections import defaultdict
 
 
-N_PATTERN = re.compile(r"=== N=(\d+)")
+# Matches "=== ... ===" markers. Captures everything between the
+# triple-equals as the column key — supports both N-only sweeps
+# (=== N=1024 ===) and grid sweeps (=== N=1024 LR=3e-4 epochs=5 ===).
+N_PATTERN = re.compile(r"=== (.+?) ===")
 # Matches both formats:
 #   test_metric/<task>/<metric>: <val>   (full eval path)
 #   test_metric/<task>: <val>            (per-task fine-tune path)
@@ -22,32 +25,46 @@ AVG_PATTERN = re.compile(r"Average test metric:\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+
 
 
 def parse_log(path):
-    """Return {N: {task: (metric_name, value)}, N: {'__avg__': value}}."""
+    """Return {marker: {task: (metric_name, value)}, marker: {'__avg__': value}}.
+
+    `marker` is the full text between the triple-equals separators in the log
+    (e.g. 'N=1024' for simple sweeps, 'N=1024 LR=3e-4 epochs=5' for grid sweeps).
+    """
     results = defaultdict(dict)
-    current_n = None
+    current = None
     with open(path) as f:
         for line in f:
             m = N_PATTERN.search(line)
             if m:
-                current_n = int(m.group(1))
+                current = m.group(1).strip()
+                # Strip trailing parens like "(zero-shot, no fine-tuning)"
+                current = re.sub(r"\s*\(.*?\)\s*$", "", current).strip()
                 continue
-            if current_n is None:
+            if current is None:
                 continue
             m = METRIC_PATTERN.search(line)
             if m:
                 task = m.group(1)
-                metric = m.group(2) or ""  # empty if single-segment form
+                metric = m.group(2) or ""
                 val = float(m.group(3))
-                results[current_n][task] = (metric, val)
+                results[current][task] = (metric, val)
                 continue
             m = AVG_PATTERN.search(line)
             if m:
-                results[current_n]["__avg__"] = ("avg", float(m.group(1)))
+                results[current]["__avg__"] = ("avg", float(m.group(1)))
     return results
 
 
+def _sort_marker_key(m):
+    """Sort markers numerically by extracted N (or 0 if not present),
+    then alphabetically. Lets 'N=1024' come before 'N=2048' before 'N=4096'."""
+    n_match = re.search(r"N=(\d+)", m)
+    n_val = int(n_match.group(1)) if n_match else 0
+    return (n_val, m)
+
+
 def format_table(results, label=""):
-    Ns = sorted(results.keys())
+    Ns = sorted(results.keys(), key=_sort_marker_key)
     if not Ns:
         print(f"[{label}] no results parsed")
         return
@@ -120,7 +137,7 @@ def format_table(results, label=""):
         print(f"Oracle avg (best-N picked per-task): {oracle_avg:.4f}")
         print("Best N per task:")
         for t, (n, v) in best_per_task.items():
-            print(f"  {t:45s} N={n:<5d} {v:.4f}")
+            print(f"  {t:45s} {str(n):<28s} {v:.4f}")
 
 
 def main():
