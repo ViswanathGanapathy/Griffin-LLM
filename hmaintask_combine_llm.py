@@ -1751,6 +1751,12 @@ def main(args):
                 model, dec, icl_projection, optimizer,
             )
     else:
+        # Move pooling modules to the right device (and DDP-wrap if needed)
+        if layer_pooling is not None and args.pool_layers > 1:
+            layer_pooling = accelerator.prepare(layer_pooling)
+        if attention_pool is not None:
+            attention_pool = accelerator.prepare(attention_pool)
+
         prepare_list = [model, projector, optimizer]
         if output_mlp is not None:
             prepare_list.insert(2, output_mlp)
