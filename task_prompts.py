@@ -249,6 +249,177 @@ def get_task_question(task_name: str, task_type: str) -> str:
         return f"Based on the data provided for '{clean}', what is the predicted class? Output the class index."
 
 
+# Per-task chain-of-thought reasoning hints. Inserted between the question
+# and "Answer:" when --cot_prompt is set. Gives the LLM extra context
+# positions to attend over before the answer position is read by the MLP.
+TASK_REASONING = {
+    # ── commerce-1 ──
+    "diginetica-downsample-ctr": (
+        "Consider:\n"
+        "- The user's prior click history and search behavior\n"
+        "- Whether the product matches their browsing patterns\n"
+        "- The session's progression so far"
+    ),
+    "rel-hm-item-sales": (
+        "Consider:\n"
+        "- The item's recent sales velocity and seasonality\n"
+        "- Customer demographics buying similar items\n"
+        "- Historical transaction trends for this category"
+    ),
+    "rel-hm-user-churn": (
+        "Consider:\n"
+        "- The customer's purchase frequency and recency\n"
+        "- Spend trends over recent transactions\n"
+        "- Engagement with seasonal collections"
+    ),
+    "retailrocket-cvr": (
+        "Consider:\n"
+        "- The session's add-to-cart and view patterns\n"
+        "- Time spent on product pages\n"
+        "- The user's prior purchase history"
+    ),
+    "seznam-charge": (
+        "Consider:\n"
+        "- The campaign's billing and spend patterns\n"
+        "- Account-level historical charges\n"
+        "- Recent campaign performance"
+    ),
+    "seznam-prepay": (
+        "Consider:\n"
+        "- The user's historical prepayment behavior\n"
+        "- Account balance trends\n"
+        "- Campaign budget patterns"
+    ),
+
+    # ── commerce-2 ──
+    "amazon-churn": (
+        "Consider:\n"
+        "- The customer's review frequency and recency\n"
+        "- Purchase categories and average review sentiment\n"
+        "- Engagement trends over the last several months"
+    ),
+    "amazon-rating": (
+        "Consider:\n"
+        "- The customer's typical rating tendency\n"
+        "- Product attributes and average ratings from similar customers\n"
+        "- Recent reviews of related products"
+    ),
+    "outbrain-small-ctr": (
+        "Consider:\n"
+        "- The user's reading topic preferences\n"
+        "- Article relevance to their browsing history\n"
+        "- Source and publisher trust signals"
+    ),
+    "rel-avito-ad-ctr": (
+        "Consider:\n"
+        "- The ad's category, price, and target user segment\n"
+        "- Historical CTR for this ad type\n"
+        "- Time-of-day and platform effects"
+    ),
+    "rel-avito-user-clicks": (
+        "Consider:\n"
+        "- The user's past clicks on similar ad categories\n"
+        "- Search and visit-stream activity\n"
+        "- Device and platform engagement signals"
+    ),
+    "rel-avito-user-visits": (
+        "Consider:\n"
+        "- The user's historical visit frequency and recency\n"
+        "- Recent search activity and platform stickiness\n"
+        "- Device persistence and login patterns"
+    ),
+
+    # ── others-1 ──
+    "rel-f1-driver-dnf": (
+        "Consider:\n"
+        "- The driver's recent reliability and DNF rate\n"
+        "- The team's mechanical performance this season\n"
+        "- The circuit's historical attrition rate"
+    ),
+    "rel-f1-driver-position": (
+        "Consider:\n"
+        "- The driver's qualifying position and recent finishes\n"
+        "- The team's car performance relative to competitors\n"
+        "- Circuit-specific historical results"
+    ),
+    "rel-f1-driver-top3": (
+        "Consider:\n"
+        "- The driver's recent podium frequency\n"
+        "- Qualifying position and starting grid\n"
+        "- The team's pace relative to leaders"
+    ),
+    "stackexchange-churn": (
+        "Consider:\n"
+        "- The user's posting and answering frequency over time\n"
+        "- Reputation gains/losses and badge progression\n"
+        "- Recent activity trends versus their historical baseline"
+    ),
+    "stackexchange-upvote": (
+        "Consider:\n"
+        "- The post's content quality signals and length\n"
+        "- The author's reputation and historical post performance\n"
+        "- The topic's typical upvote distribution"
+    ),
+    "virus-wnv-pred": (
+        "Consider:\n"
+        "- Trap location's historical positivity rate\n"
+        "- Recent weather and mosquito-density indicators\n"
+        "- Seasonal patterns and nearby trap correlations"
+    ),
+
+    # ── others-2 ──
+    "airbnb-destination": (
+        "Consider:\n"
+        "- The user's signup country and language preferences\n"
+        "- Device, browser, and signup app origin\n"
+        "- Session activity patterns prior to first booking"
+    ),
+    "rel-trial-site-success": (
+        "Consider:\n"
+        "- The site's historical enrollment performance\n"
+        "- The trial's protocol complexity and population requirements\n"
+        "- Sponsor track record and site capacity signals"
+    ),
+    "rel-trial-study-adverse": (
+        "Consider:\n"
+        "- The intervention type and known safety profile\n"
+        "- Study population size, duration, and demographics\n"
+        "- Historical adverse event rates for similar trials"
+    ),
+    "rel-trial-study-outcome": (
+        "Consider:\n"
+        "- The study's phase, design, and intervention type\n"
+        "- The sponsor's historical trial outcomes\n"
+        "- Indication-specific success rates and trial complexity"
+    ),
+    "talkingdata-demo-pred": (
+        "Consider:\n"
+        "- The device's app installation patterns\n"
+        "- Active app categories and usage frequency\n"
+        "- Device brand, model, and platform characteristics"
+    ),
+    "telstra-severity": (
+        "Consider:\n"
+        "- The event type and resource configuration\n"
+        "- Co-occurring log signals and resource counts\n"
+        "- Historical fault patterns for this event family"
+    ),
+
+    # ── facebook-recruiting (auxiliary) ──
+    "facebook-recruiting-bot": (
+        "Consider:\n"
+        "- The bidder's bidding frequency and timing patterns\n"
+        "- IP, device, and country diversity signals\n"
+        "- Auction participation and win-rate behavior"
+    ),
+}
+
+
+def get_task_reasoning(task_name: str) -> str:
+    """Return per-task CoT reasoning hint, or empty string if none defined."""
+    return TASK_REASONING.get(task_name, "")
+
+
 def audit_task_prompts(metatask: dict, verbose: bool = True) -> list:
     """Cross-check that each task's prompt format matches its metatask.yaml type.
 

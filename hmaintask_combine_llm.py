@@ -80,7 +80,7 @@ import os
 import os.path as osp
 from typing import Union, Optional
 from metric import compute_metric
-from task_prompts import get_task_description, get_task_question, build_rich_system_prompt, audit_task_prompts
+from task_prompts import get_task_description, get_task_question, get_task_reasoning, build_rich_system_prompt, audit_task_prompts
 from tabular_heads import (
     TabPFNHead, TabICLHead, LinearProbe, ICLProjection,
     extract_embeddings, eval_with_icl_head,
@@ -514,6 +514,7 @@ def build_llm_inputs(
     feature_names: Optional[list[str]] = None,
     neighbor_entity_types: Optional[list[str]] = None,
     entity_after_question: bool = True,
+    cot_prompt: bool = False,
 ):
     """Build input embeddings for the LLM.
 
@@ -578,7 +579,22 @@ def build_llm_inputs(
         )
 
     question = get_task_question(task_name, task_type)
-    question_text = f"\nQuestion: {question}\nAnswer:"
+    if cot_prompt:
+        reasoning = get_task_reasoning(task_name)
+        if reasoning:
+            question_text = (
+                f"\nQuestion: {question}\n"
+                f"Let's reason step by step.\n{reasoning}\nAnswer:"
+            )
+        else:
+            # Generic CoT scaffolding for tasks without curated hints
+            question_text = (
+                f"\nQuestion: {question}\n"
+                f"Let's reason step by step. Consider the entity's features, "
+                f"its relational neighbors, and any temporal patterns.\nAnswer:"
+            )
+    else:
+        question_text = f"\nQuestion: {question}\nAnswer:"
 
     # Tokenize + embed fixed text
     sys_ids = ld.tokenize(system_text)
@@ -984,6 +1000,7 @@ def compute_loss(model, dec, data, args,
         feature_names=feature_names,
         neighbor_entity_types=neighbor_entity_types,
         entity_after_question=getattr(args, "entity_after_question", True),
+        cot_prompt=getattr(args, "cot_prompt", False),
     )
 
     if args.head == "llm":
@@ -1092,6 +1109,7 @@ def compute_output(model, dec, data, args,
         feature_names=feature_names,
         neighbor_entity_types=neighbor_entity_types,
         entity_after_question=getattr(args, "entity_after_question", True),
+        cot_prompt=getattr(args, "cot_prompt", False),
     )
 
     if args.head == "llm_mlp":
@@ -2415,6 +2433,14 @@ if __name__ == "__main__":
                              "Has no effect on regression or multiclass losses.")
     parser.add_argument("--focal_gamma", type=float, default=2.0,
                         help="Gamma for focal loss; gamma=0 reduces to cross-entropy.")
+    parser.add_argument("--cot_prompt", action="store_true", default=False,
+                        help="Insert per-task chain-of-thought reasoning hints "
+                             "between the question and 'Answer:' position. The "
+                             "LLM doesn't generate reasoning text (the head is "
+                             "MLP, not autoregressive) — it gets extra prompt "
+                             "positions to attend over before the MLP reads the "
+                             "answer hidden state. See TASK_REASONING in "
+                             "task_prompts.py for per-task hints.")
 
     args = parser.parse_args()
     args.eval_batchsize = (
