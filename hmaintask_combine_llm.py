@@ -1551,7 +1551,8 @@ def main(args):
                                "rel-train-no-hm", "rel-hm-eval",
                                "rel-train-no-stack", "rel-stack-eval",
                                "rel-train-no-f1", "rel-f1-eval",
-                               "rel-train-no-avito", "rel-avito-eval"]:
+                               "rel-train-no-avito", "rel-avito-eval",
+                               "joint-all-4"]:
             with open("task_names.yaml", "r") as f:
                 tasks_dict = yaml.load(f, Loader=yaml.FullLoader)
             tasknames = tasks_dict[tasknames[0]]
@@ -1578,7 +1579,8 @@ def main(args):
                         "rel-train-no-hm", "rel-hm-eval",
                         "rel-train-no-stack", "rel-stack-eval",
                         "rel-train-no-f1", "rel-f1-eval",
-                        "rel-train-no-avito", "rel-avito-eval"]:
+                        "rel-train-no-avito", "rel-avito-eval",
+                        "joint-all-4"]:
                 with open("task_names.yaml", "r") as f:
                     tasks_dict = yaml.load(f, Loader=yaml.FullLoader)
                 return tasks_dict[kw]

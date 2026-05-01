@@ -147,6 +147,38 @@ rel-avito-eval:
   - rel-avito-user-clicks
   - rel-avito-ad-ctr
 
+# Union of commerce-1, commerce-2, others-1, others-2 — 24 tasks total.
+# Used for in-distribution multi-task training (not cross-dataset transfer).
+joint-all-4:
+  # commerce-1
+  - diginetica-downsample-ctr
+  - rel-hm-item-sales
+  - rel-hm-user-churn
+  - retailrocket-cvr
+  - seznam-charge
+  - seznam-prepay
+  # commerce-2
+  - amazon-churn
+  - amazon-rating
+  - outbrain-small-ctr
+  - rel-avito-ad-ctr
+  - rel-avito-user-clicks
+  - rel-avito-user-visits
+  # others-1
+  - rel-f1-driver-dnf
+  - rel-f1-driver-position
+  - rel-f1-driver-top3
+  - stackexchange-churn
+  - stackexchange-upvote
+  - virus-wnv-pred
+  # others-2
+  - airbnb-destination
+  - rel-trial-site-success
+  - rel-trial-study-adverse
+  - rel-trial-study-outcome
+  - talkingdata-demo-pred
+  - telstra-severity
+
 single:
   - anime_planet-anime_planet-Rating_Score
   - babies_r_us-babies_r_us-price
