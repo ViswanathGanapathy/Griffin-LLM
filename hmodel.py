@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from typing import List, Tuple, Union
 from torch import Tensor
 from torch_geometric.nn import MessagePassing
@@ -181,6 +182,8 @@ class GriffinMod(nn.Module):
         num_mp: int = 2,
         use_rev: bool = True,
         use_gate: bool = True,
+        use_smpnn: bool = False,
+        smpnn_alpha_init: float = 1e-6,
     ):
         super().__init__()
         self.nodefeataggr = nn.ModuleList(
@@ -195,14 +198,22 @@ class GriffinMod(nn.Module):
         self.lintask = nn.ModuleList(
             [nn.Linear(hiddim, hiddim, bias=False) for _ in range(num_mp - 1)]
         )
-        self.mlp = nn.ModuleList(
-            [
-                nn.Sequential(
-                    nn.Linear(hiddim, hiddim, bias=False), nn.SiLU(inplace=True)
-                )
-                for _ in range(num_mp)
-            ]
-        )
+        # MLPpre. In the SMPNN-Griffin block (Eq. 10), MLPpre is a linear
+        # projection only — the SiLU activation is moved post-aggregation
+        # (Eq. 13). In the legacy Griffin path, MLPpre is Linear → SiLU.
+        if use_smpnn:
+            self.mlp = nn.ModuleList(
+                [nn.Linear(hiddim, hiddim, bias=False) for _ in range(num_mp)]
+            )
+        else:
+            self.mlp = nn.ModuleList(
+                [
+                    nn.Sequential(
+                        nn.Linear(hiddim, hiddim, bias=False), nn.SiLU(inplace=True)
+                    )
+                    for _ in range(num_mp)
+                ]
+            )
         self.mlp2 = nn.ModuleList(
             [
                 nn.Sequential(
@@ -212,9 +223,29 @@ class GriffinMod(nn.Module):
             ]
         )
         self.num_mp = num_mp
+        # Shared non-affine LN, used by both paths for taskfeat normalization
+        # and (in legacy path) for the per-layer x normalization. The paper
+        # explicitly preserves this for the taskfeat update path.
         self.ln = nn.LayerNorm(hiddim, elementwise_affine=False)
         self.use_rev = use_rev
         self.use_gate = use_gate
+        self.use_smpnn = use_smpnn
+
+        # SMPNN-Griffin per-layer affine LayerNorms (Eq. 9 and Eq. 14) and a
+        # learnable α scaling for the feedforward sub-block (Eq. 15),
+        # initialized at 1e-6 so the feedforward starts near-identity.
+        if use_smpnn:
+            self.ln1 = nn.ModuleList(
+                [nn.LayerNorm(hiddim, elementwise_affine=True) for _ in range(num_mp)]
+            )
+            self.ln2 = nn.ModuleList(
+                [nn.LayerNorm(hiddim, elementwise_affine=True) for _ in range(num_mp)]
+            )
+            self.alpha_ff = nn.Parameter(torch.full((num_mp,), float(smpnn_alpha_init)))
+        else:
+            self.ln1 = None
+            self.ln2 = None
+            self.alpha_ff = None
 
         self.gatelin = nn.ModuleList(
             [
@@ -251,7 +282,78 @@ class GriffinMod(nn.Module):
             self.mpnn[i].reset_parameters()
             if self.gatelin is not None:
                 self.gatelin[i][0].reset_parameters()
-    
+
+    def _block_update(
+        self,
+        i: int,
+        x: Tensor,
+        edge_index: Tensor,
+        edge_attr_type: Tensor,
+        edge_attr: Tensor,
+    ) -> Tensor:
+        """Per-layer block update for x.
+
+        Two paths share the same Griffin-specific components (RMPNN, reverse
+        edges, per-node gating), differing only in how the sub-blocks are
+        composed:
+
+        * Legacy (``use_smpnn=False``): Eq. 8 in the paper. A single shared
+          non-affine LN feeds both the feedforward and the message-passing
+          paths in parallel; the result is summed into a single residual
+          update of x. SiLU lives inside MLPpre (pre-aggregation).
+
+        * SMPNN-Griffin (``use_smpnn=True``): Eqs. 9–15. Two sequential
+          sub-blocks each with its own per-layer affine LN. Sub-block 1 does
+          gated forward + reverse RMPNN, applies SiLU *post-aggregation
+          after gating* (so SiLU(0)=0 keeps identity at init), and adds a
+          residual to x. Sub-block 2 then runs MLP_ff on the *post-
+          aggregation* x with a learnable α scalar (init 1e-6) so the FFN
+          contribution starts near-zero.
+        """
+        if self.use_smpnn:
+            # ── Sub-block 1: graph convolution (Eqs. 9–13) ──
+            lnx = self.ln1[i](x)
+            mlpx = self.mlp[i](lnx)  # plain Linear (no SiLU) in this path
+            gate_fwd = self.gatelin[i](lnx) if self.use_gate else 1
+            r_fwd = gate_fwd * self.mpnn[i](
+                mlpx, edge_index, edge_attr_type, edge_attr
+            )
+            if self.use_rev:
+                gate_rev = self.revgatelin[i](lnx) if self.use_gate else 1
+                r_rev = gate_rev * self.revmpnn[i](
+                    mlpx,
+                    None if edge_index is None else edge_index[[1, 0]],
+                    edge_attr_type,
+                    edge_attr,
+                )
+            else:
+                r_rev = 0
+            # Post-aggregation SiLU after gating: at init g=g̃=0 ⇒ SiLU(0)=0
+            x = x + F.silu(r_fwd + r_rev)
+            # ── Sub-block 2: feedforward on POST-aggregation x (Eqs. 14–15) ──
+            x = x + self.alpha_ff[i] * self.mlp2[i](self.ln2[i](x))
+            return x
+        else:
+            # ── Legacy parallel update (Eq. 8) ──
+            lnx = self.ln(x)
+            mlpx = self.mlp[i](lnx)
+            return (
+                x
+                + self.mlp2[i](lnx)
+                + (
+                    (self.gatelin[i](lnx) if self.use_gate else 1)
+                    * self.mpnn[i](mlpx, edge_index, edge_attr_type, edge_attr)
+                )
+                + (
+                    (
+                        (self.revgatelin[i](lnx) if self.use_gate else 1)
+                        * self.revmpnn[i](mlpx, None if edge_index is None else edge_index[[1, 0]], edge_attr_type, edge_attr)
+                    )
+                    if self.use_rev
+                    else 0
+                )
+            )
+
     def forward_with_each_layer_output(
         self,
         node: List[Tuple[Tensor, Tensor]],
@@ -298,24 +400,7 @@ class GriffinMod(nn.Module):
                     ],
                     dim=0,
                 )
-            lnx = self.ln(x)
-            mlpx = self.mlp[i](lnx)
-            x = (
-                x
-                + self.mlp2[i](lnx)
-                + (
-                    (self.gatelin[i](lnx) if self.use_gate else 1)
-                    * self.mpnn[i](mlpx, edge_index, edge_attr_type, edge_attr)
-                )
-                + (
-                    (
-                        (self.revgatelin[i](lnx) if self.use_gate else 1)
-                        * self.revmpnn[i](mlpx, None if edge_index is None else edge_index[[1, 0]], edge_attr_type, edge_attr)
-                    )
-                    if self.use_rev
-                    else 0
-                )
-            )
+            x = self._block_update(i, x, edge_index, edge_attr_type, edge_attr)
             return_x.append(x.detach().cpu())
 
             if i < self.num_mp - 1:
@@ -368,24 +453,7 @@ class GriffinMod(nn.Module):
                     ],
                     dim=0,
                 )
-            lnx = self.ln(x)
-            mlpx = self.mlp[i](lnx)
-            x = (
-                x
-                + self.mlp2[i](lnx)
-                + (
-                    (self.gatelin[i](lnx) if self.use_gate else 1)
-                    * self.mpnn[i](mlpx, edge_index, edge_attr_type, edge_attr)
-                )
-                + (
-                    (
-                        (self.revgatelin[i](lnx) if self.use_gate else 1)
-                        * self.revmpnn[i](mlpx, None if edge_index is None else edge_index[[1, 0]], edge_attr_type, edge_attr)
-                    )
-                    if self.use_rev
-                    else 0
-                )
-            )
+            x = self._block_update(i, x, edge_index, edge_attr_type, edge_attr)
 
             if i < self.num_mp - 1:
                 ntaskfeat = self.lintask[i](self.ln(x))

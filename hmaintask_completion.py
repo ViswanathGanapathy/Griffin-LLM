@@ -10,9 +10,53 @@ from hFloatEmb import SimpleRepeater, getfloatdec
 import numpy as np
 import accelerate
 import argparse
+import os
 import os.path as osp
 from typing import Union
 from metric import compute_metric
+from safetensors.torch import load_file
+
+
+def _load_legacy_into_smpnn(model: GriffinMod, loadpath: str) -> None:
+    """Warm-start a use_smpnn=True GriffinMod from a legacy Griffin checkpoint.
+
+    The legacy MLPpre is stored as ``mlp.{i}.0.weight`` (Sequential-wrapped
+    Linear). The SMPNN MLPpre is a plain Linear at ``mlp.{i}.weight``. We
+    rename keys, then load non-strict so the new SMPNN-only params
+    (``ln1``, ``ln2``, ``alpha_ff``) keep their identity-style init
+    (affine LN with weight=1/bias=0; alpha_ff=1e-6). Layers in the model
+    beyond the checkpoint's ``num_mp`` are also left at init — for SMPNN
+    blocks this is approximately identity at step 0.
+    """
+    sd = load_file(os.path.join(loadpath, "model.safetensors"))
+    renamed = {}
+    n_renamed = 0
+    for k, v in sd.items():
+        if k.startswith("mlp.") and k.endswith(".0.weight"):
+            renamed[k[: -len(".0.weight")] + ".weight"] = v
+            n_renamed += 1
+        else:
+            renamed[k] = v
+    missing, unexpected = model.load_state_dict(renamed, strict=False)
+    print(
+        f"[smpnn warm-start] from {loadpath}: "
+        f"renamed {n_renamed} mlp keys, "
+        f"missing={len(missing)}, unexpected={len(unexpected)}"
+    )
+    if unexpected:
+        # Unexpected keys mean checkpoint has params the SMPNN model doesn't —
+        # likely a num_mp mismatch (ckpt deeper than model) or an unrelated
+        # checkpoint. Raise so we don't silently drop weights.
+        raise RuntimeError(
+            f"[smpnn warm-start] unexpected keys not consumed by model "
+            f"(checkpoint has weights this model can't use): {unexpected}"
+        )
+    # Missing keys are expected for SMPNN-only params (ln1/ln2/alpha_ff) and
+    # for any layers in the model beyond the checkpoint's num_mp (those stay
+    # at init — which for SMPNN blocks is approximately identity). Just
+    # report so the user can spot anything surprising.
+    if missing:
+        print(f"[smpnn warm-start] kept at init: {missing}")
 
 def eval_task(model, dec, dataset, args, accelerator, metric):
     model.eval()
@@ -107,9 +151,18 @@ def main(args):
     accelerator.init_trackers(args.logname)
     tbtracker = accelerator.get_tracker("tensorboard")
 
-    model = GriffinMod(hiddim=args.hiddim, num_mp=args.num_mp, use_rev=args.use_rev, use_gate=args.use_gate)
+    model = GriffinMod(
+        hiddim=args.hiddim,
+        num_mp=args.num_mp,
+        use_rev=args.use_rev,
+        use_gate=args.use_gate,
+        use_smpnn=args.use_smpnn,
+    )
     if args.loadpath is not None:
-        accelerate.load_checkpoint_in_model(model, args.loadpath)
+        if args.use_smpnn:
+            _load_legacy_into_smpnn(model, args.loadpath)
+        else:
+            accelerate.load_checkpoint_in_model(model, args.loadpath)
     # model.reset_parameters()
     dec = getfloatdec(args.hiddim)
 
@@ -341,6 +394,15 @@ if __name__ == "__main__":
     parser.add_argument("--hop", type=int, default=2)
     parser.add_argument("--use_rev", type=str2bool, default=True)
     parser.add_argument("--use_gate", type=str2bool, default=True)
+    parser.add_argument(
+        "--use_smpnn",
+        type=str2bool,
+        default=False,
+        help="Use SMPNN-Griffin block (per-layer affine LN, sequential "
+        "sub-blocks, post-aggregation SiLU, alpha-scaled FFN). When True "
+        "and --loadpath is set, a key-rename migration is applied so "
+        "legacy Griffin checkpoints can warm-start an SMPNN model.",
+    )
 
     args = parser.parse_args()
     args.eval_batchsize = args.batchsize if args.eval_batchsize is None else args.eval_batchsize
