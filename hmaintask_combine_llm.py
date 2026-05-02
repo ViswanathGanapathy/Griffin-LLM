@@ -143,6 +143,74 @@ def debug_check_neighbors(
           f"{zero_counts} / {K}")
 
 
+def compute_regression_target_stats(graph, task, tasknames, args, floatembmodel,
+                                     n_samples=200, accelerator=None):
+    """Compute per-task target mean/std for regression normalization.
+
+    Samples up to n_samples training examples per regression task and computes
+    mean/std of the targets. Returns dict {task_name: (mean, std)}.
+
+    Stats are computed once at startup; downstream code reads from
+    args.target_stats during compute_loss / compute_output.
+    """
+    target_stats = {}
+    is_main = accelerator is None or accelerator.is_main_process
+
+    for tn in tasknames:
+        meta = task.metatask.get(tn, {})
+        if meta.get("task_type") != "regression":
+            continue
+        try:
+            ds = construct_dataset(graph, task, [tn], "train", args, floatembmodel)
+            labels = []
+            n = min(n_samples, len(ds))
+            for i in range(n):
+                try:
+                    sample = ds[i]
+                    # LLM heads: tuple has label at position 6
+                    # Default head: tuple has label at -3 from the end
+                    if args.head in ("llm", "llm_mlp"):
+                        label = sample[6]
+                    else:
+                        label = sample[-3]
+                    if torch.is_tensor(label):
+                        labels.extend(label.flatten().float().tolist())
+                    else:
+                        labels.append(float(label))
+                except Exception:
+                    continue
+            if len(labels) >= 2:
+                arr = np.asarray(labels, dtype=np.float64)
+                mean = float(arr.mean())
+                std = float(arr.std()) + 1e-6  # epsilon for numerical safety
+                target_stats[tn] = (mean, std)
+                if is_main:
+                    print(f"[TargetStats] {tn}: mean={mean:.4f} std={std:.4f} "
+                          f"(n={len(labels)} samples)")
+            elif is_main:
+                print(f"[TargetStats] {tn}: not enough samples ({len(labels)})")
+        except Exception as e:
+            if is_main:
+                print(f"[TargetStats] {tn}: failed to compute ({e})")
+    return target_stats
+
+
+def normalize_target(label, taskname, target_stats):
+    """Normalize regression label to ~unit-variance scale using cached stats."""
+    if target_stats is None or taskname not in target_stats:
+        return label
+    mean, std = target_stats[taskname]
+    return (label - mean) / std
+
+
+def denormalize_prediction(pred, taskname, target_stats):
+    """Inverse of normalize_target — restores prediction to raw target scale."""
+    if target_stats is None or taskname not in target_stats:
+        return pred
+    mean, std = target_stats[taskname]
+    return pred * std + mean
+
+
 def focal_cross_entropy(logits: torch.Tensor, target: torch.Tensor,
                         gamma: float = 2.0, alpha: float = None) -> torch.Tensor:
     """Multi-class focal loss (Lin et al. 2017).
@@ -1058,7 +1126,19 @@ def compute_loss(model, dec, data, args,
 
         # Loss computation
         if num_classes is None:
-            loss = F.mse_loss(pred[:, 0], label.float())
+            # Regression: optionally normalize target, optionally use Huber
+            target = label.float()
+            target_stats = getattr(args, "target_stats", None)
+            if target_stats is not None and taskname in target_stats:
+                mean, std = target_stats[taskname]
+                target = (target - mean) / std
+            if getattr(args, "huber_loss", False):
+                loss = F.huber_loss(
+                    pred[:, 0], target,
+                    delta=getattr(args, "huber_delta", 1.0),
+                )
+            else:
+                loss = F.mse_loss(pred[:, 0], target)
         else:
             if getattr(args, "focal_loss", False) and num_classes == 2:
                 loss = focal_cross_entropy(
@@ -1147,7 +1227,14 @@ def compute_output(model, dec, data, args,
             pred = task_mlp(pooled.float())
 
         if num_classes is None:
-            return pred[:, :1], label  # [B, 1], [B]
+            # Regression: denormalize prediction back to raw target scale
+            # so the metric (MAE/RMSE) is computed on the original units.
+            pred_out = pred[:, :1]
+            target_stats = getattr(args, "target_stats", None)
+            if target_stats is not None and taskname in target_stats:
+                mean, std = target_stats[taskname]
+                pred_out = pred_out * std + mean
+            return pred_out, label  # [B, 1], [B]
         else:
             return pred[:, :num_classes], label  # [B, num_classes], [B]
 
@@ -1725,6 +1812,27 @@ def main(args):
     )
 
     floatembmodel = SimpleRepeater(args.hiddim)
+
+    # ── Target normalization stats (regression tasks only) ──
+    args.target_stats = None
+    if args.target_normalize:
+        if accelerator.is_main_process:
+            print(f"\n[TargetStats] Computing per-task regression stats "
+                  f"(sampling {args.target_stats_samples} per task)...")
+        # Compute stats for all regression tasks across train AND eval splits
+        # so per-task FT on eval tasks also normalizes correctly.
+        all_reg_tasks = [tn for tn in all_tasknames
+                         if task.metatask[tn].get("task_type") == "regression"]
+        if all_reg_tasks:
+            args.target_stats = compute_regression_target_stats(
+                graph, task, all_reg_tasks, args, floatembmodel,
+                n_samples=args.target_stats_samples,
+                accelerator=accelerator,
+            )
+        else:
+            if accelerator.is_main_process:
+                print(f"[TargetStats] No regression tasks found; normalization "
+                      f"is a no-op.")
 
     dataset = construct_dataset(graph, task, tasknames, "train", args, floatembmodel)
     valid_dataset_dict = {
@@ -2441,6 +2549,22 @@ if __name__ == "__main__":
                              "Has no effect on regression or multiclass losses.")
     parser.add_argument("--focal_gamma", type=float, default=2.0,
                         help="Gamma for focal loss; gamma=0 reduces to cross-entropy.")
+    parser.add_argument("--huber_loss", action="store_true", default=False,
+                        help="Use Huber loss instead of MSE for regression. "
+                             "Robust to outliers (L2 for small errors, L1 for "
+                             "large ones). Useful for noisy regression targets.")
+    parser.add_argument("--huber_delta", type=float, default=1.0,
+                        help="Huber delta — threshold separating L2 and L1 regions.")
+    parser.add_argument("--target_normalize", action="store_true", default=False,
+                        help="Normalize regression targets to unit variance per "
+                             "task before computing loss. Stats are sampled from "
+                             "the training set at startup. Predictions are "
+                             "denormalized back to raw scale at inference. Fixes "
+                             "the cross-task scale mismatch (e.g. amazon-rating "
+                             "1-5 vs rel-avito-ad-ctr 0-0.1).")
+    parser.add_argument("--target_stats_samples", type=int, default=200,
+                        help="Number of training samples per regression task to "
+                             "use for computing target normalization stats.")
     parser.add_argument("--cot_prompt", action="store_true", default=False,
                         help="Insert per-task chain-of-thought reasoning hints "
                              "between the question and 'Answer:' position. The "
