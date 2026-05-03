@@ -162,6 +162,13 @@ def compute_regression_target_stats(graph, task, tasknames, args, floatembmodel,
             continue
         try:
             ds = construct_dataset(graph, task, [tn], "train", args, floatembmodel)
+            # Populate dataset indices — required for __len__ and __getitem__.
+            # Use the downsample variant: only builds an index for n_samples
+            # entries (vs the full training set), so it stays fast even for
+            # huge tasks like rel-avito with millions of samples.
+            if accelerator is not None:
+                seed = getattr(args, 'downsample_seed', None) or 42
+                ds.rebuild_indice_downsample_absolute(accelerator, n_samples, seed)
             labels = []
             n = min(n_samples, len(ds))
             for i in range(n):
