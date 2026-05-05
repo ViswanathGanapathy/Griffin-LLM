@@ -2562,16 +2562,28 @@ if __name__ == "__main__":
                              "large ones). Useful for noisy regression targets.")
     parser.add_argument("--huber_delta", type=float, default=1.0,
                         help="Huber delta — threshold separating L2 and L1 regions.")
-    parser.add_argument("--target_normalize", action="store_true", default=False,
+    # target_normalize is ON by default — empirically the second-biggest
+    # single-flag win in the project (see sprints/v2/RESULTS.md section 6i).
+    # Use --no_target_normalize to explicitly disable for ablation or to
+    # remain compatible with checkpoints trained without normalization.
+    parser.add_argument("--target_normalize", dest="target_normalize",
+                        action="store_true", default=True,
                         help="Normalize regression targets to unit variance per "
                              "task before computing loss. Stats are sampled from "
                              "the training set at startup. Predictions are "
                              "denormalized back to raw scale at inference. Fixes "
                              "the cross-task scale mismatch (e.g. amazon-rating "
-                             "1-5 vs rel-avito-ad-ctr 0-0.1).")
+                             "1-5 vs rel-avito-ad-ctr 0-0.1). DEFAULT: ON.")
+    parser.add_argument("--no_target_normalize", dest="target_normalize",
+                        action="store_false",
+                        help="Disable target normalization (revert to raw-scale "
+                             "regression targets). Use this for ablations or to "
+                             "remain compatible with checkpoints trained without "
+                             "normalization.")
     parser.add_argument("--target_stats_samples", type=int, default=200,
                         help="Number of training samples per regression task to "
-                             "use for computing target normalization stats.")
+                             "use for computing target normalization stats. "
+                             "Only relevant when target_normalize is enabled.")
     parser.add_argument("--cot_prompt", action="store_true", default=False,
                         help="Insert per-task chain-of-thought reasoning hints "
                              "between the question and 'Answer:' position. The "

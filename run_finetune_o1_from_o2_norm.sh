@@ -19,7 +19,7 @@ case "$MODE" in
         ;;
     noflag|raw)
         CHECKPOINT="checkpoints/o2-to-o1-raw/best_checkpoint"
-        EXTRA_FLAGS=""
+        EXTRA_FLAGS="--no_target_normalize"
         TAG="o1-from-o2-raw"
         ;;
     huber-norm)

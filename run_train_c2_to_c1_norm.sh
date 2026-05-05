@@ -24,7 +24,7 @@ case "$MODE" in
         TAG="c2-to-c1-norm"
         ;;
     noflag|raw)
-        EXTRA_FLAGS=""
+        EXTRA_FLAGS="--no_target_normalize"
         TAG="c2-to-c1-raw"
         ;;
     huber-norm)

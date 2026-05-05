@@ -21,7 +21,7 @@ case "$MODE" in
         ;;
     noflag|raw)
         CHECKPOINT="checkpoints/c1-to-c2-raw/best_checkpoint"
-        EXTRA_FLAGS=""
+        EXTRA_FLAGS="--no_target_normalize"
         TAG="c2-from-c1-raw"
         ;;
     huber-norm)

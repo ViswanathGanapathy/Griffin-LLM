@@ -26,7 +26,7 @@ case "$MODE" in
         TAG="o2-to-o1-norm"
         ;;
     noflag|raw)
-        EXTRA_FLAGS=""
+        EXTRA_FLAGS="--no_target_normalize"
         TAG="o2-to-o1-raw"
         ;;
     huber-norm)
