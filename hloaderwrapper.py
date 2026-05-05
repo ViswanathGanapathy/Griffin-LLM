@@ -133,12 +133,16 @@ def buildindice_downsample_absolute(shuffle, lens, batch_size, downsample_num, d
             ind.append(idx)
     else:
         for nodetypeidx, (_, num) in enumerate(lens):
+            # If requested downsample exceeds available training samples, clamp
+            # to the dataset size rather than raising. Tasks with limited
+            # training data (e.g. rel-avito-ad-ctr with 5100 samples,
+            # rel-f1-driver-top3 with 2667 samples) are common in this dataset.
             if downsample_num > num:
-                if _ == "rel-f1-driver-top3":
-                    downsample_num = 1024
-                else:
-                    raise ValueError(f"downsample_num {downsample_num} is greater than num {num}")
-            sample_num = downsample_num
+                print(f"[downsample] clamping {_}: requested {downsample_num} > available {num}, using {num}")
+                effective_downsample = num
+            else:
+                effective_downsample = downsample_num
+            sample_num = effective_downsample
             leftnum = sample_num % batch_size
             padnum = 0 if leftnum == 0 else batch_size - leftnum
             # The first part is the sample part, with sample_num elements ranging from 0 to num-1
