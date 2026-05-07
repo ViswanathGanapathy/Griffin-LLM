@@ -370,7 +370,7 @@ class TabPFNHead:
 class TabICLHead:
     """Wraps TabICL v2 as a prediction head over Griffin embeddings.
 
-    TabICL uses a three-stage architecture:
+    TabICL v2 uses a three-stage architecture:
       1. Column Embedding — projects each feature dim to 128-d
       2. Row Interaction — transformer with RoPE, produces 512-d row vectors
       3. ICL Learning — 12-layer transformer, train rows (with labels) serve
@@ -384,7 +384,22 @@ class TabICLHead:
         device:           torch device string or None (auto)
         n_estimators:     number of ensemble members (feature shuffles)
         max_context_size: max ICL context examples
+        checkpoint_version: TabICL checkpoint to load. Examples:
+                            - None / "default": library auto-selects
+                            - "v2": map to known v2 checkpoint name
+                            - explicit ".ckpt" filename: pass through verbatim
+                            See tabicl release notes for available checkpoints.
+        model_path:       absolute path to a local TabICL .ckpt file. If set,
+                          overrides checkpoint_version (and avoids download).
     """
+
+    # Known TabICL checkpoint version aliases. Update as the library publishes
+    # new model versions on HuggingFace. v2 was the latest as of mid-2025.
+    _CHECKPOINT_VERSION_MAP = {
+        "default": None,                                   # let tabicl pick
+        "v1": "tabicl-classifier-v1.1-0506.ckpt",
+        "v2": "tabicl-classifier-v2.ckpt",                 # latest as of writing
+    }
 
     def __init__(
         self,
@@ -392,29 +407,75 @@ class TabICLHead:
         device: Optional[str] = None,
         n_estimators: int = 8,
         max_context_size: int = TABICL_MAX_CONTEXT,
+        checkpoint_version: str = "v2",
+        model_path: Optional[str] = None,
     ):
         self.task_type = task_type
         self.device = device
         self.n_estimators = n_estimators
         self.max_context_size = max_context_size
+        self.checkpoint_version = checkpoint_version
+        self.model_path = model_path
         self.model = None
         self._fitted = False
+
+    def _resolve_checkpoint_kwargs(self) -> dict:
+        """Build kwargs to pass to TabICLClassifier/Regressor for version
+        selection.
+
+        Returns a dict that may contain `model_path` and/or `checkpoint_version`
+        depending on what's set. If both are unset (default), returns empty
+        and lets the library pick.
+
+        We probe the underlying class for accepted kwargs and only pass what
+        it supports — different tabicl releases expose different version knobs.
+        """
+        kwargs = {}
+        if self.model_path is not None:
+            kwargs["model_path"] = self.model_path
+            return kwargs
+
+        # Resolve checkpoint_version alias to a real checkpoint filename
+        ckpt = self._CHECKPOINT_VERSION_MAP.get(
+            self.checkpoint_version, self.checkpoint_version
+        )
+        if ckpt is None:
+            return kwargs  # let library pick default
+        kwargs["checkpoint_version"] = ckpt
+        return kwargs
 
     def _create_model(self):
         """Lazily create the TabICL model."""
         from tabicl import TabICLClassifier, TabICLRegressor
-        if self.task_type == "regression":
-            self.model = TabICLRegressor(
-                n_estimators=self.n_estimators,
-                device=self.device,
-            )
-        else:
-            self.model = TabICLClassifier(
-                n_estimators=self.n_estimators,
-                device=self.device,
-            )
-        logger.info(f"[TabICL] Created "
-                     f"{'regressor' if self.task_type == 'regression' else 'classifier'}")
+        cls = TabICLRegressor if self.task_type == "regression" else TabICLClassifier
+
+        # Build base kwargs always supported
+        ctor_kwargs = {
+            "n_estimators": self.n_estimators,
+            "device": self.device,
+        }
+
+        # Add version-related kwargs, filtering to only those the installed
+        # tabicl release accepts (forward/backward-compat across versions).
+        import inspect
+        accepted = set(inspect.signature(cls.__init__).parameters.keys())
+        for k, v in self._resolve_checkpoint_kwargs().items():
+            if k in accepted:
+                ctor_kwargs[k] = v
+            else:
+                logger.warning(
+                    f"[TabICL] installed tabicl does not accept '{k}'; "
+                    f"falling back to library default checkpoint. "
+                    f"Upgrade tabicl to use {self.checkpoint_version}."
+                )
+
+        self.model = cls(**ctor_kwargs)
+        head_type = "regressor" if self.task_type == "regression" else "classifier"
+        version_msg = (
+            f" model_path={self.model_path}" if self.model_path
+            else f" checkpoint_version={self.checkpoint_version}"
+        )
+        logger.info(f"[TabICL] Created {head_type}{version_msg}")
 
     def fit(self, X_train: np.ndarray, y_train: np.ndarray):
         """Fit TabICL on training embeddings + labels.

@@ -1488,6 +1488,8 @@ def _run_icl_evaluation(model, train_dataset, valid_dataset_dict,
                 device=str(accelerator.device),
                 n_estimators=args.icl_n_estimators,
                 max_context_size=args.icl_max_context,
+                checkpoint_version=args.tabicl_checkpoint_version,
+                model_path=args.tabicl_model_path,
             )
 
         # Fit on train embeddings
@@ -2524,6 +2526,14 @@ if __name__ == "__main__":
                         help="Learning rate for TabPFN fine-tuning")
     parser.add_argument("--icl_n_estimators", type=int, default=8,
                         help="Number of ensemble members for TabPFN/TabICL")
+    parser.add_argument("--tabicl_checkpoint_version", type=str, default="v2",
+                        help="TabICL checkpoint version. Aliases: 'default' "
+                             "(let library pick), 'v1', 'v2' (latest, default). "
+                             "Or pass an explicit '.ckpt' filename. Ignored if "
+                             "--tabicl_model_path is set.")
+    parser.add_argument("--tabicl_model_path", type=str, default=None,
+                        help="Absolute path to a local TabICL .ckpt file. "
+                             "Overrides --tabicl_checkpoint_version when set.")
     parser.add_argument("--icl_proj_dim", type=int, default=128,
                         help="Output dimension of ICL projection layer "
                              "(compresses Griffin hiddim → this dim for TabPFN/TabICL)")
