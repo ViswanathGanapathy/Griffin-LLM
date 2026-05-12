@@ -1918,7 +1918,7 @@ def main(args):
             # ICL heads: extract embeddings → fit → predict
             _run_icl_evaluation(
                 model, dataset, valid_dataset_dict, test_dataset_dict,
-                tasknames, task_type_dict, metric_dict,
+                eval_tasknames, task_type_dict, metric_dict,
                 args, accelerator, tbtracker, step=0,
                 icl_projection=icl_projection,
                 graph=graph, task_obj=task,
@@ -2133,7 +2133,7 @@ def main(args):
 
         _run_icl_evaluation(
             model, dataset, valid_dataset_dict, test_dataset_dict,
-            tasknames, task_type_dict, metric_dict,
+            eval_tasknames, task_type_dict, metric_dict,
             args, accelerator, tbtracker, step=step if args.probe_epochs > 0 else 0,
             icl_projection=icl_projection,
             graph=graph, task_obj=task,
