@@ -22,7 +22,7 @@ CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 PYTHONUNBUFFERED=1 python hmaintask_combine_llm.py \
     datasets/joint-v65 logs/icl-o1-to-o2 icl-o1-to-o2 \
     --head tabicl \
-    --tasks others-1 \
+    --tasks rel-f1-driver-position \
     --eval_tasks others-2 \
     --loadpath checkpoints/o1-tth-lora-v3/best_checkpoint \
     --probe_epochs 5 \
@@ -33,5 +33,6 @@ PYTHONUNBUFFERED=1 python hmaintask_combine_llm.py \
     --hop 2 --fanout 20 --fewshotfanout 3 \
     --batchsize 256 --lr 1e-4 --wd 2e-4 \
     --hiddim 512 --num_mp 4 --use_rev True --use_gate True \
+    --output_mlp_dim 1 \
     --no_target_normalize \
     --savepath checkpoints/icl-o1-to-o2
