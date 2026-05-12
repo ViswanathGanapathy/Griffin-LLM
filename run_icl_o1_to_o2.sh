@@ -32,6 +32,6 @@ PYTHONUNBUFFERED=1 python hmaintask_combine_llm.py \
     --tabicl_checkpoint_version v2 \
     --hop 2 --fanout 20 --fewshotfanout 3 \
     --batchsize 256 --lr 1e-4 --wd 2e-4 \
-    --hiddim 512 --num_mp 4 --use_rev True --use_gate False \
+    --hiddim 512 --num_mp 4 --use_rev True --use_gate True \
     --no_target_normalize \
     --savepath checkpoints/icl-o1-to-o2
