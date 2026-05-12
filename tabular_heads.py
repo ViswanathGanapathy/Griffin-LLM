@@ -430,11 +430,19 @@ class TabICLHead:
 
         We probe the underlying class for accepted kwargs and only pass what
         it supports — different tabicl releases expose different version knobs.
+
+        Note: the version aliases in _CHECKPOINT_VERSION_MAP are classifier
+        checkpoints. For regression we let tabicl pick its own default
+        regressor weights instead of forcing the classifier file in (which
+        loads but then trips predict_stats's max_classes==0 assertion).
         """
         kwargs = {}
         if self.model_path is not None:
             kwargs["model_path"] = self.model_path
             return kwargs
+
+        if self.task_type == "regression":
+            return kwargs  # let library pick its regressor default
 
         # Resolve checkpoint_version alias to a real checkpoint filename
         ckpt = self._CHECKPOINT_VERSION_MAP.get(
