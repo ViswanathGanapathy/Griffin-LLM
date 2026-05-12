@@ -396,9 +396,10 @@ class TabICLHead:
     # Known TabICL checkpoint version aliases. Update as the library publishes
     # new model versions on HuggingFace. v2 was the latest as of mid-2025.
     _CHECKPOINT_VERSION_MAP = {
-        "default": None,                                   # let tabicl pick
-        "v1": "tabicl-classifier-v1.1-0506.ckpt",
-        "v2": "tabicl-classifier-v2.ckpt",                 # latest as of writing
+        "default": None,                                       # let tabicl pick
+        "v1": "tabicl-classifier-v1-20250208.ckpt",
+        "v1.1": "tabicl-classifier-v1.1-20250506.ckpt",
+        "v2": "tabicl-classifier-v2-20260212.ckpt",            # latest
     }
 
     def __init__(
