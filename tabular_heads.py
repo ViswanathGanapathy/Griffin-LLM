@@ -450,10 +450,16 @@ class TabICLHead:
         from tabicl import TabICLClassifier, TabICLRegressor
         cls = TabICLRegressor if self.task_type == "regression" else TabICLClassifier
 
+        # tabicl's mem_get_info requires an indexed device (e.g. cuda:0);
+        # accelerator.device often serialises to bare "cuda".
+        device = self.device
+        if isinstance(device, str) and device == "cuda":
+            device = f"cuda:{torch.cuda.current_device()}"
+
         # Build base kwargs always supported
         ctor_kwargs = {
             "n_estimators": self.n_estimators,
-            "device": self.device,
+            "device": device,
         }
 
         # Add version-related kwargs, filtering to only those the installed
