@@ -1483,6 +1483,12 @@ def _run_icl_evaluation(model, train_dataset, valid_dataset_dict,
                 finetune_lr=args.tabpfn_finetune_lr,
             )
         else:
+            ft_output_dir = None
+            if args.tabicl_finetune and args.savepath is not None:
+                ft_output_dir = osp.join(
+                    args.savepath, "tabicl_finetune", tn,
+                )
+                os.makedirs(ft_output_dir, exist_ok=True)
             icl_head = TabICLHead(
                 task_type=task_type,
                 device=str(accelerator.device),
@@ -1490,12 +1496,27 @@ def _run_icl_evaluation(model, train_dataset, valid_dataset_dict,
                 max_context_size=args.icl_max_context,
                 checkpoint_version=args.tabicl_checkpoint_version,
                 model_path=args.tabicl_model_path,
+                finetune=args.tabicl_finetune,
+                finetune_epochs=args.tabicl_finetune_epochs,
+                finetune_lr=args.tabicl_finetune_lr,
+                finetune_patience=args.tabicl_finetune_patience,
+                finetune_n_estimators_train=args.tabicl_finetune_n_estimators_train,
+                finetune_n_estimators_validation=args.tabicl_finetune_n_estimators_validation,
+                finetune_eval_metric=args.tabicl_finetune_eval_metric,
+                finetune_output_dir=ft_output_dir,
             )
 
-        # Fit on train embeddings
-        icl_head.fit(train_embs, train_labels)
+        # Fit on train embeddings — pass valid through when fine-tuning so
+        # tabicl can use it for early stopping. Only one fit per task.
+        if args.head == "tabicl" and args.tabicl_finetune:
+            icl_head.fit(train_embs, train_labels,
+                         X_val=valid_embs, y_val=valid_labels)
+        else:
+            icl_head.fit(train_embs, train_labels)
 
-        # Evaluate on valid
+        # Evaluate on valid (NOTE: when fine-tuning, valid was used for early
+        # stopping, so this valid score is mildly optimistic — test is the
+        # clean held-out metric).
         valid_score = eval_with_icl_head(
             icl_head, train_embs, train_labels,
             valid_embs, valid_labels, metric_name,
@@ -2534,6 +2555,27 @@ if __name__ == "__main__":
     parser.add_argument("--tabicl_model_path", type=str, default=None,
                         help="Absolute path to a local TabICL .ckpt file. "
                              "Overrides --tabicl_checkpoint_version when set.")
+    # TabICL native fine-tuning (requires `pip install tabicl[finetune]`)
+    parser.add_argument("--tabicl_finetune", action="store_true", default=False,
+                        help="Fine-tune TabICL using FinetunedTabICL*. "
+                             "Requires the 'tabicl[finetune]' extra. The task's "
+                             "valid split is used for early stopping; report "
+                             "the test metric as the clean held-out score.")
+    parser.add_argument("--tabicl_finetune_epochs", type=int, default=50,
+                        help="Max epochs for TabICL fine-tuning (early stopping "
+                             "may cut it short).")
+    parser.add_argument("--tabicl_finetune_lr", type=float, default=1e-5,
+                        help="AdamW learning rate for TabICL fine-tuning.")
+    parser.add_argument("--tabicl_finetune_patience", type=int, default=10,
+                        help="Early-stopping patience (non-improving epochs).")
+    parser.add_argument("--tabicl_finetune_n_estimators_train", type=int, default=2,
+                        help="Ensemble members per training meta-batch.")
+    parser.add_argument("--tabicl_finetune_n_estimators_validation", type=int, default=2,
+                        help="Ensemble size for end-of-epoch validation.")
+    parser.add_argument("--tabicl_finetune_eval_metric", type=str, default=None,
+                        help="Early-stopping metric. Classifier choices: "
+                             "roc_auc | log_loss | accuracy. Regressor: "
+                             "rmse | mae | r2. Default: roc_auc (clf), rmse (reg).")
     parser.add_argument("--icl_proj_dim", type=int, default=128,
                         help="Output dimension of ICL projection layer "
                              "(compresses Griffin hiddim → this dim for TabPFN/TabICL)")

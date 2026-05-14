@@ -410,6 +410,16 @@ class TabICLHead:
         max_context_size: int = TABICL_MAX_CONTEXT,
         checkpoint_version: str = "v2",
         model_path: Optional[str] = None,
+        finetune: bool = False,
+        finetune_epochs: int = 50,
+        finetune_lr: float = 1e-5,
+        finetune_patience: int = 10,
+        finetune_n_estimators_train: int = 2,
+        finetune_n_estimators_validation: int = 2,
+        finetune_eval_metric: Optional[str] = None,
+        finetune_output_dir: Optional[str] = None,
+        finetune_verbose: bool = True,
+        finetune_random_state: int = 0,
     ):
         self.task_type = task_type
         self.device = device
@@ -417,8 +427,24 @@ class TabICLHead:
         self.max_context_size = max_context_size
         self.checkpoint_version = checkpoint_version
         self.model_path = model_path
+        self.finetune = finetune
+        self.finetune_epochs = finetune_epochs
+        self.finetune_lr = finetune_lr
+        self.finetune_patience = finetune_patience
+        self.finetune_n_estimators_train = finetune_n_estimators_train
+        self.finetune_n_estimators_validation = finetune_n_estimators_validation
+        self.finetune_eval_metric = finetune_eval_metric
+        self.finetune_output_dir = finetune_output_dir
+        self.finetune_verbose = finetune_verbose
+        self.finetune_random_state = finetune_random_state
         self.model = None
         self._fitted = False
+
+    def _default_eval_metric(self) -> str:
+        """Pick a sensible eval_metric for early stopping given task_type."""
+        if self.finetune_eval_metric is not None:
+            return self.finetune_eval_metric
+        return "roc_auc" if self.task_type != "regression" else "rmse"
 
     def _resolve_checkpoint_kwargs(self) -> dict:
         """Build kwargs to pass to TabICLClassifier/Regressor for version
@@ -455,8 +481,21 @@ class TabICLHead:
 
     def _create_model(self):
         """Lazily create the TabICL model."""
-        from tabicl import TabICLClassifier, TabICLRegressor
-        cls = TabICLRegressor if self.task_type == "regression" else TabICLClassifier
+        if self.finetune:
+            try:
+                from tabicl import (
+                    FinetunedTabICLClassifier as _FtCls,
+                    FinetunedTabICLRegressor as _FtReg,
+                )
+            except ImportError as e:
+                raise ImportError(
+                    "FinetunedTabICL* requires the finetune extra. "
+                    "Install with: pip install 'tabicl[finetune]'"
+                ) from e
+            cls = _FtReg if self.task_type == "regression" else _FtCls
+        else:
+            from tabicl import TabICLClassifier, TabICLRegressor
+            cls = TabICLRegressor if self.task_type == "regression" else TabICLClassifier
 
         # tabicl's mem_get_info requires an indexed device (e.g. cuda:0);
         # accelerator.device often serialises to bare "cuda".
@@ -470,29 +509,53 @@ class TabICLHead:
             "device": device,
         }
 
-        # Add version-related kwargs, filtering to only those the installed
-        # tabicl release accepts (forward/backward-compat across versions).
+        # Finetune-only kwargs. Filtered against the constructor signature
+        # below so older tabicl releases (without the finetune extra) keep
+        # working.
+        if self.finetune:
+            ctor_kwargs.update({
+                "n_estimators_inference": self.n_estimators,
+                "n_estimators_finetune": self.finetune_n_estimators_train,
+                "n_estimators_validation": self.finetune_n_estimators_validation,
+                "epochs": self.finetune_epochs,
+                "learning_rate": self.finetune_lr,
+                "early_stopping": True,
+                "patience": self.finetune_patience,
+                "eval_metric": self._default_eval_metric(),
+                "random_state": self.finetune_random_state,
+                "verbose": self.finetune_verbose,
+            })
+
+        # Merge checkpoint kwargs, then filter the full kwarg dict against the
+        # installed cls.__init__ signature (forward/backward-compat across
+        # tabicl releases: older versions may not accept some finetune knobs).
+        ctor_kwargs.update(self._resolve_checkpoint_kwargs())
         import inspect
         accepted = set(inspect.signature(cls.__init__).parameters.keys())
-        for k, v in self._resolve_checkpoint_kwargs().items():
+        filtered, dropped = {}, []
+        for k, v in ctor_kwargs.items():
             if k in accepted:
-                ctor_kwargs[k] = v
+                filtered[k] = v
             else:
-                logger.warning(
-                    f"[TabICL] installed tabicl does not accept '{k}'; "
-                    f"falling back to library default checkpoint. "
-                    f"Upgrade tabicl to use {self.checkpoint_version}."
-                )
+                dropped.append(k)
+        if dropped:
+            logger.warning(
+                f"[TabICL] installed tabicl does not accept kwargs {dropped}; "
+                f"dropped. Upgrade tabicl if these are required."
+            )
 
-        self.model = cls(**ctor_kwargs)
+        self.model = cls(**filtered)
         head_type = "regressor" if self.task_type == "regression" else "classifier"
+        mode = "finetune" if self.finetune else "zero-shot"
         version_msg = (
             f" model_path={self.model_path}" if self.model_path
             else f" checkpoint_version={self.checkpoint_version}"
         )
-        logger.info(f"[TabICL] Created {head_type}{version_msg}")
+        logger.info(f"[TabICL] Created {mode} {head_type}{version_msg}")
 
-    def fit(self, X_train: np.ndarray, y_train: np.ndarray):
+    def fit(self, X_train: np.ndarray, y_train: np.ndarray,
+            X_val: Optional[np.ndarray] = None,
+            y_val: Optional[np.ndarray] = None):
         """Fit TabICL on training embeddings + labels.
 
         Subsamples if N_train > max_context_size.
@@ -500,16 +563,33 @@ class TabICLHead:
         Args:
             X_train: [N_train, embed_dim] Griffin embeddings (numpy)
             y_train: [N_train] labels (numpy)
+            X_val:   [N_val, embed_dim] held-out features (finetune only,
+                     used for early stopping). Ignored in zero-shot mode.
+            y_val:   [N_val] held-out labels (finetune only).
         """
         if self.model is None:
             self._create_model()
         X_ctx, y_ctx = subsample_context(
             X_train, y_train, self.max_context_size,
         )
-        logger.info(f"[TabICL] Fitting on {X_ctx.shape[0]} context samples "
-                     f"(from {X_train.shape[0]} total), "
-                     f"{X_ctx.shape[1]} features")
-        self.model.fit(X_ctx, y_ctx)
+        if self.finetune:
+            fit_kwargs = {}
+            if X_val is not None and y_val is not None:
+                fit_kwargs.update({"X_val": X_val, "y_val": y_val})
+            if self.finetune_output_dir is not None:
+                fit_kwargs["output_dir"] = self.finetune_output_dir
+            logger.info(
+                f"[TabICL] Fine-tuning on {X_ctx.shape[0]} context samples "
+                f"(from {X_train.shape[0]} total), {X_ctx.shape[1]} features"
+                + (f", val={X_val.shape[0]}" if X_val is not None else "")
+            )
+            self.model.fit(X_ctx, y_ctx, **fit_kwargs)
+        else:
+            logger.info(
+                f"[TabICL] Fitting on {X_ctx.shape[0]} context samples "
+                f"(from {X_train.shape[0]} total), {X_ctx.shape[1]} features"
+            )
+            self.model.fit(X_ctx, y_ctx)
         self._fitted = True
 
     def predict(self, X_test: np.ndarray) -> np.ndarray:
@@ -612,14 +692,20 @@ def extract_embeddings(model, dataset, accelerator, icl_projection=None):
 
 def eval_with_icl_head(icl_head, train_embs, train_labels,
                        test_embs, test_labels, metric_name):
-    """Fit an ICL head on train embeddings and evaluate on test embeddings.
+    """Evaluate a pre-fitted ICL head on a held-out split.
+
+    The head must already have been fit (the caller handles fit so we can
+    share one expensive fine-tune call across multiple eval splits).
+    train_embs / train_labels are accepted only to back-fit if the caller
+    hasn't done so yet — this keeps the historical API but avoids the
+    redundant 3-fits-per-task pattern when callers fit explicitly.
 
     Args:
         icl_head:     TabPFNHead or TabICLHead instance
-        train_embs:   [N_train, D] numpy array
-        train_labels: [N_train] numpy array
-        test_embs:    [N_test, D] numpy array
-        test_labels:  [N_test] numpy array
+        train_embs:   [N_train, D] (used only to lazy-fit if not already fit)
+        train_labels: [N_train]    (same)
+        test_embs:    [N_test, D] features to score on
+        test_labels:  [N_test] true labels
         metric_name:  metric string for compute_metric
 
     Returns:
@@ -627,7 +713,8 @@ def eval_with_icl_head(icl_head, train_embs, train_labels,
     """
     from metric import compute_metric
 
-    icl_head.fit(train_embs, train_labels)
+    if not getattr(icl_head, "_fitted", False):
+        icl_head.fit(train_embs, train_labels)
     preds = icl_head.predict(test_embs)
 
     # Convert to tensors matching compute_metric expectations
