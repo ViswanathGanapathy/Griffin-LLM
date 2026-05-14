@@ -24,7 +24,7 @@ PYTHONUNBUFFERED=1 python hmaintask_combine_llm.py \
     --loadpath checkpoints/o1-tth-lora-v3/best_checkpoint \
     --probe_epochs 5 \
     --icl_proj_dim 128 \
-    --icl_max_context 10000 \
+    --icl_max_context 2000 \
     --icl_n_estimators 8 \
     --tabicl_checkpoint_version v2 \
     --tabicl_finetune \

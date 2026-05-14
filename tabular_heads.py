@@ -503,11 +503,13 @@ class TabICLHead:
         if isinstance(device, str) and device == "cuda":
             device = f"cuda:{torch.cuda.current_device()}"
 
-        # Build base kwargs always supported
-        ctor_kwargs = {
-            "n_estimators": self.n_estimators,
-            "device": device,
-        }
+        # Build base kwargs always supported. n_estimators is the zero-shot
+        # ensemble knob; FT classes route this through n_estimators_inference
+        # instead, so we omit the bare n_estimators in FT mode to avoid a
+        # spurious "kwarg not accepted" warning.
+        ctor_kwargs = {"device": device}
+        if not self.finetune:
+            ctor_kwargs["n_estimators"] = self.n_estimators
 
         # Finetune-only kwargs. Filtered against the constructor signature
         # below so older tabicl releases (without the finetune extra) keep
