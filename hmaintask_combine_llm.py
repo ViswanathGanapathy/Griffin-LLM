@@ -1527,9 +1527,12 @@ def _run_icl_evaluation(model, train_dataset, valid_dataset_dict,
                 finetune_n_estimators_validation=args.tabicl_finetune_n_estimators_validation,
                 finetune_eval_metric=args.tabicl_finetune_eval_metric,
                 finetune_output_dir=ft_output_dir,
-                finetune_mixed_precision=args.tabicl_finetune_mixed_precision,
-                finetune_batch_size=args.tabicl_finetune_batch_size,
-                finetune_grad_checkpointing=args.tabicl_finetune_grad_checkpointing,
+                finetune_freeze_col=args.tabicl_finetune_freeze_col,
+                finetune_freeze_row=args.tabicl_finetune_freeze_row,
+                finetune_freeze_icl=args.tabicl_finetune_freeze_icl,
+                finetune_max_data_size=args.tabicl_finetune_max_data_size,
+                finetune_weight_decay=args.tabicl_finetune_weight_decay,
+                finetune_grad_clip=args.tabicl_finetune_grad_clip,
             )
 
         # Classification tasks: tabicl's FT classifier scatters by labels
@@ -2641,22 +2644,26 @@ if __name__ == "__main__":
                              "not supported by tabicl. To use multiple GPUs, "
                              "split eval tasks across two parallel jobs with "
                              "different CUDA_VISIBLE_DEVICES.")
-    # Memory-related kwargs (silently dropped if installed tabicl does
-    # not accept them — run probe_tabicl_ft.py to check).
-    parser.add_argument("--tabicl_finetune_mixed_precision", type=str, default=None,
-                        choices=[None, "no", "fp16", "bf16"],
-                        help="Mixed-precision mode for the FT loop. bf16 halves "
-                             "activation memory and is usually safe on A100/H100. "
-                             "Dropped if the installed tabicl release doesn't "
-                             "expose 'mixed_precision'.")
-    parser.add_argument("--tabicl_finetune_batch_size", type=int, default=None,
-                        help="Per-step batch size inside tabicl's FT loop. "
-                             "Smaller = less activation memory, slower per epoch.")
-    parser.add_argument("--tabicl_finetune_grad_checkpointing",
-                        action="store_true", default=False,
-                        help="Enable gradient checkpointing inside tabicl's FT "
-                             "loop (trades compute for memory). Dropped if the "
-                             "installed tabicl release doesn't expose it.")
+    # Real tabicl FT knobs discovered via probe_tabicl_ft.py. AMP is on
+    # by default inside tabicl (mixed precision is automatic), so we
+    # don't expose a knob for that.
+    parser.add_argument("--tabicl_finetune_freeze_col", action="store_true", default=False,
+                        help="Freeze the column embedder during FT. Saves the most "
+                             "memory (no backward through the 12-layer col attention). "
+                             "Standard parameter-efficient FT trick.")
+    parser.add_argument("--tabicl_finetune_freeze_row", action="store_true", default=False,
+                        help="Freeze the row interaction transformer during FT.")
+    parser.add_argument("--tabicl_finetune_freeze_icl", action="store_true", default=False,
+                        help="Freeze the ICL learning transformer during FT.")
+    parser.add_argument("--tabicl_finetune_max_data_size", type=int, default=None,
+                        help="Cap on internal FT samples per epoch (tabicl default: "
+                             "10000). Lower = less compute per epoch.")
+    parser.add_argument("--tabicl_finetune_weight_decay", type=float, default=None,
+                        help="AdamW weight decay inside tabicl's FT loop "
+                             "(tabicl default: 0.01).")
+    parser.add_argument("--tabicl_finetune_grad_clip", type=float, default=None,
+                        help="Gradient clipping inside tabicl's FT loop "
+                             "(tabicl default: 1.0).")
     parser.add_argument("--icl_proj_dim", type=int, default=128,
                         help="Output dimension of ICL projection layer "
                              "(compresses Griffin hiddim → this dim for TabPFN/TabICL)")

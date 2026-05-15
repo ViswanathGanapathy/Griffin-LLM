@@ -1,20 +1,22 @@
 #!/bin/bash
-# TabICL FT, o1->o2, Path A: single-GPU + memory optimisations to fit a
-# larger context (target 4-5K, up from the 2K cap on the previous run).
+# TabICL FT, o1->o2, Path A: single-GPU + freeze the column embedder so a
+# much larger context fits. tabicl already runs AMP (mixed precision) by
+# default — that's NOT a knob we control. The real lever for memory is
+# freezing the early heavy stage.
 #
-# Optimisations applied:
-#   1. --tabicl_finetune_n_estimators_train 1   (was 2)  -> ~half activations
-#   2. --tabicl_finetune_n_estimators_validation 1       -> smaller val pass
-#   3. --tabicl_finetune_mixed_precision bf16            -> ~half memory
-#   4. --tabicl_finetune_grad_checkpointing              -> trades compute for memory
+# Knobs we use (verified via probe_tabicl_ft.py):
+#   1. --tabicl_finetune_freeze_col  -> no backward through the 12-layer col
+#                                       embedder; biggest single memory win
+#   2. --tabicl_finetune_n_estimators_train 1   (was 2)  -> ~half activations
+#   3. --tabicl_finetune_n_estimators_validation 1
 #
-# All four are filtered against the installed tabicl signature; any that
-# the installed release doesn't accept are silently dropped (with a warning
-# in the log). Run probe_tabicl_ft.py first to see which are actually
-# supported.
+# Knobs from the previous version of this script that were DROPPED:
+#   --tabicl_finetune_mixed_precision  (tabicl auto-enables AMP)
+#   --tabicl_finetune_grad_checkpointing  (not exposed by tabicl)
+#   --tabicl_finetune_batch_size  (not exposed by tabicl)
 #
-# Context is initially 4000 — bump to 5000-6000 if you see plenty of
-# headroom in nvidia-smi after the first task. Lower to 3000 if it OOMs.
+# Context: 6000 — freezing col_embedder gives us a lot of headroom over the
+# 2K cap of the previous run.
 #
 # REQUIRES: pip install 'tabicl[finetune]'
 #
@@ -31,7 +33,7 @@ PYTHONUNBUFFERED=1 python hmaintask_combine_llm.py \
     --loadpath checkpoints/o1-tth-lora-v3/best_checkpoint \
     --probe_epochs 5 \
     --icl_proj_dim 128 \
-    --icl_max_context 4000 \
+    --icl_max_context 6000 \
     --icl_n_estimators 8 \
     --tabicl_checkpoint_version v2 \
     --tabicl_finetune \
@@ -40,8 +42,7 @@ PYTHONUNBUFFERED=1 python hmaintask_combine_llm.py \
     --tabicl_finetune_patience 10 \
     --tabicl_finetune_n_estimators_train 1 \
     --tabicl_finetune_n_estimators_validation 1 \
-    --tabicl_finetune_mixed_precision bf16 \
-    --tabicl_finetune_grad_checkpointing \
+    --tabicl_finetune_freeze_col \
     --hop 2 --fanout 20 --fewshotfanout 3 \
     --batchsize 256 --lr 1e-4 --wd 2e-4 \
     --hiddim 512 --num_mp 4 --use_rev True --use_gate True \

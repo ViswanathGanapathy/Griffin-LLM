@@ -420,9 +420,12 @@ class TabICLHead:
         finetune_output_dir: Optional[str] = None,
         finetune_verbose: bool = True,
         finetune_random_state: int = 0,
-        finetune_mixed_precision: Optional[str] = None,
-        finetune_batch_size: Optional[int] = None,
-        finetune_grad_checkpointing: bool = False,
+        finetune_freeze_col: bool = False,
+        finetune_freeze_row: bool = False,
+        finetune_freeze_icl: bool = False,
+        finetune_max_data_size: Optional[int] = None,
+        finetune_weight_decay: Optional[float] = None,
+        finetune_grad_clip: Optional[float] = None,
     ):
         self.task_type = task_type
         self.device = device
@@ -440,9 +443,12 @@ class TabICLHead:
         self.finetune_output_dir = finetune_output_dir
         self.finetune_verbose = finetune_verbose
         self.finetune_random_state = finetune_random_state
-        self.finetune_mixed_precision = finetune_mixed_precision
-        self.finetune_batch_size = finetune_batch_size
-        self.finetune_grad_checkpointing = finetune_grad_checkpointing
+        self.finetune_freeze_col = finetune_freeze_col
+        self.finetune_freeze_row = finetune_freeze_row
+        self.finetune_freeze_icl = finetune_freeze_icl
+        self.finetune_max_data_size = finetune_max_data_size
+        self.finetune_weight_decay = finetune_weight_decay
+        self.finetune_grad_clip = finetune_grad_clip
         self.model = None
         self._fitted = False
 
@@ -544,15 +550,22 @@ class TabICLHead:
                 "random_state": self.finetune_random_state,
                 "verbose": self.finetune_verbose,
             })
-            # Optional memory-related kwargs. Filtered against the
-            # installed cls.__init__ signature below — silently dropped
-            # if the installed tabicl release doesn't expose them.
-            if self.finetune_mixed_precision is not None:
-                ctor_kwargs["mixed_precision"] = self.finetune_mixed_precision
-            if self.finetune_batch_size is not None:
-                ctor_kwargs["batch_size"] = self.finetune_batch_size
-            if self.finetune_grad_checkpointing:
-                ctor_kwargs["gradient_checkpointing"] = True
+            # Stage-freezing for parameter-efficient FT. Freezing the
+            # column embedder is the biggest single memory win — no
+            # gradient through the 12-layer attention tower.
+            if self.finetune_freeze_col:
+                ctor_kwargs["freeze_col"] = True
+            if self.finetune_freeze_row:
+                ctor_kwargs["freeze_row"] = True
+            if self.finetune_freeze_icl:
+                ctor_kwargs["freeze_icl"] = True
+            # Other supported knobs (no-op if installed release omits them).
+            if self.finetune_max_data_size is not None:
+                ctor_kwargs["max_data_size"] = self.finetune_max_data_size
+            if self.finetune_weight_decay is not None:
+                ctor_kwargs["weight_decay"] = self.finetune_weight_decay
+            if self.finetune_grad_clip is not None:
+                ctor_kwargs["grad_clip"] = self.finetune_grad_clip
 
         # Merge checkpoint kwargs, then filter the full kwarg dict against the
         # installed cls.__init__ signature (forward/backward-compat across
