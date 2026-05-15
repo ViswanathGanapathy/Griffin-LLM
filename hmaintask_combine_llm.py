@@ -1506,9 +1506,18 @@ def _run_icl_evaluation(model, train_dataset, valid_dataset_dict,
                     args.savepath, "tabicl_finetune", tn,
                 )
                 os.makedirs(ft_output_dir, exist_ok=True)
+            # In multi-GPU FT mode we want tabicl to see all visible GPUs,
+            # which means passing bare "cuda" (not "cuda:N"). The
+            # accelerator pins to a single device for everything else, so
+            # we override here just for the FT-eligible classification/
+            # regression call.
+            tabicl_device = (
+                "cuda" if (args.tabicl_multi_gpu and use_ft_for_this_task)
+                else str(accelerator.device)
+            )
             icl_head = TabICLHead(
                 task_type=task_type,
-                device=str(accelerator.device),
+                device=tabicl_device,
                 n_estimators=args.icl_n_estimators,
                 max_context_size=args.icl_max_context,
                 checkpoint_version=args.tabicl_checkpoint_version,
@@ -1521,6 +1530,7 @@ def _run_icl_evaluation(model, train_dataset, valid_dataset_dict,
                 finetune_n_estimators_validation=args.tabicl_finetune_n_estimators_validation,
                 finetune_eval_metric=args.tabicl_finetune_eval_metric,
                 finetune_output_dir=ft_output_dir,
+                multi_gpu=args.tabicl_multi_gpu,
             )
 
         # Classification tasks: tabicl's FT classifier scatters by labels
@@ -2627,6 +2637,12 @@ if __name__ == "__main__":
                              "roc_auc | log_loss | accuracy. Regressor: "
                              "mae | mse | r2 (tabicl's FT regressor rejects "
                              "'rmse'). Default: roc_auc (clf), mae (reg).")
+    parser.add_argument("--tabicl_multi_gpu", action="store_true", default=False,
+                        help="Let tabicl's FT loop use all GPUs visible via "
+                             "CUDA_VISIBLE_DEVICES (e.g. CUDA_VISIBLE_DEVICES=0,1). "
+                             "Skips our cuda->cuda:0 device pinning so tabicl can "
+                             "shard activations across GPUs and fit a larger "
+                             "context. Only meaningful with --tabicl_finetune.")
     parser.add_argument("--icl_proj_dim", type=int, default=128,
                         help="Output dimension of ICL projection layer "
                              "(compresses Griffin hiddim → this dim for TabPFN/TabICL)")
