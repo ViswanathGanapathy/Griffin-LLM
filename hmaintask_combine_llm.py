@@ -1506,6 +1506,20 @@ def _run_icl_evaluation(model, train_dataset, valid_dataset_dict,
                 finetune_output_dir=ft_output_dir,
             )
 
+        # Diagnostic dump — cheap, useful when FT/ICL paths misbehave on
+        # unfamiliar labels.
+        if accelerator.is_main_process:
+            print(
+                f"  [LABELS] y_train dtype={train_labels.dtype} "
+                f"shape={train_labels.shape} "
+                f"min={train_labels.min()} max={train_labels.max()}"
+            )
+            uniq, cnt = np.unique(train_labels, return_counts=True)
+            print(f"  [LABELS] y_train unique: "
+                  f"{dict(zip(uniq.tolist(), cnt.tolist()))}")
+            v_uniq = np.unique(valid_labels)
+            print(f"  [LABELS] y_valid unique: {v_uniq.tolist()}")
+
         # Fit on train embeddings — pass valid through when fine-tuning so
         # tabicl can use it for early stopping. Only one fit per task.
         if args.head == "tabicl" and args.tabicl_finetune:
