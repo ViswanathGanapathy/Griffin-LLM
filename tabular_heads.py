@@ -441,10 +441,16 @@ class TabICLHead:
         self._fitted = False
 
     def _default_eval_metric(self) -> str:
-        """Pick a sensible eval_metric for early stopping given task_type."""
+        """Pick a sensible eval_metric for early stopping given task_type.
+
+        Defaults align with what tabicl's FT regressor/classifier accept:
+        classifier -> 'roc_auc', regressor -> 'mae'. The regressor rejects
+        'rmse' even though it's a common name elsewhere — pass an explicit
+        --tabicl_finetune_eval_metric to override.
+        """
         if self.finetune_eval_metric is not None:
             return self.finetune_eval_metric
-        return "roc_auc" if self.task_type != "regression" else "rmse"
+        return "roc_auc" if self.task_type != "regression" else "mae"
 
     def _resolve_checkpoint_kwargs(self) -> dict:
         """Build kwargs to pass to TabICLClassifier/Regressor for version

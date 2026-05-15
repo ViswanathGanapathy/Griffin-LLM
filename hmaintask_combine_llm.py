@@ -2589,7 +2589,8 @@ if __name__ == "__main__":
     parser.add_argument("--tabicl_finetune_eval_metric", type=str, default=None,
                         help="Early-stopping metric. Classifier choices: "
                              "roc_auc | log_loss | accuracy. Regressor: "
-                             "rmse | mae | r2. Default: roc_auc (clf), rmse (reg).")
+                             "mae | mse | r2 (tabicl's FT regressor rejects "
+                             "'rmse'). Default: roc_auc (clf), mae (reg).")
     parser.add_argument("--icl_proj_dim", type=int, default=128,
                         help="Output dimension of ICL projection layer "
                              "(compresses Griffin hiddim → this dim for TabPFN/TabICL)")
