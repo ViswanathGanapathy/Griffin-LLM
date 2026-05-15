@@ -1483,8 +1483,25 @@ def _run_icl_evaluation(model, train_dataset, valid_dataset_dict,
                 finetune_lr=args.tabpfn_finetune_lr,
             )
         else:
+            # tabicl v2's pretrained classifier supports up to 10 classes.
+            # Its y_encoder one-hots labels against a fixed num_classes; tasks
+            # with more distinct labels (e.g., airbnb-destination has 12)
+            # trip an out-of-bounds scatter inside FT. Fall back to ZS for
+            # those — ZS uses a different inference path that tolerates it.
+            TABICL_FT_MAX_CLASSES = 10
+            use_ft_for_this_task = args.tabicl_finetune
+            if (use_ft_for_this_task and task_type != "regression"):
+                num_classes = int(np.unique(train_labels).size)
+                if num_classes > TABICL_FT_MAX_CLASSES:
+                    print(
+                        f"  [WARN] {tn}: {num_classes} classes exceeds "
+                        f"TabICL FT cap ({TABICL_FT_MAX_CLASSES}); falling "
+                        f"back to zero-shot ICL for this task."
+                    )
+                    use_ft_for_this_task = False
+
             ft_output_dir = None
-            if args.tabicl_finetune and args.savepath is not None:
+            if use_ft_for_this_task and args.savepath is not None:
                 ft_output_dir = osp.join(
                     args.savepath, "tabicl_finetune", tn,
                 )
@@ -1496,7 +1513,7 @@ def _run_icl_evaluation(model, train_dataset, valid_dataset_dict,
                 max_context_size=args.icl_max_context,
                 checkpoint_version=args.tabicl_checkpoint_version,
                 model_path=args.tabicl_model_path,
-                finetune=args.tabicl_finetune,
+                finetune=use_ft_for_this_task,
                 finetune_epochs=args.tabicl_finetune_epochs,
                 finetune_lr=args.tabicl_finetune_lr,
                 finetune_patience=args.tabicl_finetune_patience,
@@ -1541,7 +1558,7 @@ def _run_icl_evaluation(model, train_dataset, valid_dataset_dict,
 
         # Fit on train embeddings — pass valid through when fine-tuning so
         # tabicl can use it for early stopping. Only one fit per task.
-        if args.head == "tabicl" and args.tabicl_finetune:
+        if args.head == "tabicl" and use_ft_for_this_task:
             icl_head.fit(train_embs, train_labels,
                          X_val=valid_embs, y_val=valid_labels)
         else:
