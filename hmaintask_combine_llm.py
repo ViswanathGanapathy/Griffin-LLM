@@ -1506,17 +1506,15 @@ def _run_icl_evaluation(model, train_dataset, valid_dataset_dict,
                     args.savepath, "tabicl_finetune", tn,
                 )
                 os.makedirs(ft_output_dir, exist_ok=True)
-            # multi_gpu must be scoped per-task. ZS-fallback tasks need an
-            # indexed device (cuda:N) because tabicl's mem_get_info rejects
-            # bare "cuda". Only the actually-FT-ing tasks should keep
-            # "cuda" so tabicl can shard activations across visible GPUs.
-            this_task_multi_gpu = args.tabicl_multi_gpu and use_ft_for_this_task
-            tabicl_device = (
-                "cuda" if this_task_multi_gpu else str(accelerator.device)
-            )
+            # Always pass an indexed device. Single-process multi-GPU FT
+            # is not supported by tabicl (its FT loop swallows validation
+            # errors when given bare "cuda", and its predict path crashes
+            # on mem_get_info). Use `accelerate launch --multi_gpu` for
+            # true multi-GPU, or split tasks across GPUs by running two
+            # processes with different CUDA_VISIBLE_DEVICES.
             icl_head = TabICLHead(
                 task_type=task_type,
-                device=tabicl_device,
+                device=str(accelerator.device),
                 n_estimators=args.icl_n_estimators,
                 max_context_size=args.icl_max_context,
                 checkpoint_version=args.tabicl_checkpoint_version,
@@ -1529,7 +1527,6 @@ def _run_icl_evaluation(model, train_dataset, valid_dataset_dict,
                 finetune_n_estimators_validation=args.tabicl_finetune_n_estimators_validation,
                 finetune_eval_metric=args.tabicl_finetune_eval_metric,
                 finetune_output_dir=ft_output_dir,
-                multi_gpu=this_task_multi_gpu,
             )
 
         # Classification tasks: tabicl's FT classifier scatters by labels
@@ -2637,11 +2634,10 @@ if __name__ == "__main__":
                              "mae | mse | r2 (tabicl's FT regressor rejects "
                              "'rmse'). Default: roc_auc (clf), mae (reg).")
     parser.add_argument("--tabicl_multi_gpu", action="store_true", default=False,
-                        help="Let tabicl's FT loop use all GPUs visible via "
-                             "CUDA_VISIBLE_DEVICES (e.g. CUDA_VISIBLE_DEVICES=0,1). "
-                             "Skips our cuda->cuda:0 device pinning so tabicl can "
-                             "shard activations across GPUs and fit a larger "
-                             "context. Only meaningful with --tabicl_finetune.")
+                        help="DEPRECATED no-op. Single-process multi-GPU FT is "
+                             "not supported by tabicl. To use multiple GPUs, "
+                             "split eval tasks across two parallel jobs with "
+                             "different CUDA_VISIBLE_DEVICES.")
     parser.add_argument("--icl_proj_dim", type=int, default=128,
                         help="Output dimension of ICL projection layer "
                              "(compresses Griffin hiddim → this dim for TabPFN/TabICL)")

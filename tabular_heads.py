@@ -420,7 +420,6 @@ class TabICLHead:
         finetune_output_dir: Optional[str] = None,
         finetune_verbose: bool = True,
         finetune_random_state: int = 0,
-        multi_gpu: bool = False,
     ):
         self.task_type = task_type
         self.device = device
@@ -438,7 +437,6 @@ class TabICLHead:
         self.finetune_output_dir = finetune_output_dir
         self.finetune_verbose = finetune_verbose
         self.finetune_random_state = finetune_random_state
-        self.multi_gpu = multi_gpu
         self.model = None
         self._fitted = False
 
@@ -506,13 +504,14 @@ class TabICLHead:
             cls = TabICLRegressor if self.task_type == "regression" else TabICLClassifier
 
         # tabicl's mem_get_info requires an indexed device (e.g. cuda:0);
-        # accelerator.device often serialises to bare "cuda". Normally we
-        # pin to a single GPU index; but when multi_gpu is set we keep the
-        # bare "cuda" string so tabicl's FT loop can shard activations
-        # across all visible GPUs (driven by CUDA_VISIBLE_DEVICES).
+        # accelerator.device often serialises to bare "cuda". Always
+        # normalise to an indexed device — single-process multi-GPU is
+        # NOT supported by tabicl's FT loop (validation/predict call
+        # mem_get_info(self.exe_device) which rejects bare "cuda"). For
+        # multi-GPU FT, use `accelerate launch --multi_gpu` at the
+        # script level instead.
         device = self.device
-        if (isinstance(device, str) and device == "cuda"
-                and not self.multi_gpu):
+        if isinstance(device, str) and device == "cuda":
             device = f"cuda:{torch.cuda.current_device()}"
 
         # Build base kwargs always supported. n_estimators is the zero-shot
