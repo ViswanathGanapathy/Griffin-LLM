@@ -1506,14 +1506,13 @@ def _run_icl_evaluation(model, train_dataset, valid_dataset_dict,
                     args.savepath, "tabicl_finetune", tn,
                 )
                 os.makedirs(ft_output_dir, exist_ok=True)
-            # In multi-GPU FT mode we want tabicl to see all visible GPUs,
-            # which means passing bare "cuda" (not "cuda:N"). The
-            # accelerator pins to a single device for everything else, so
-            # we override here just for the FT-eligible classification/
-            # regression call.
+            # multi_gpu must be scoped per-task. ZS-fallback tasks need an
+            # indexed device (cuda:N) because tabicl's mem_get_info rejects
+            # bare "cuda". Only the actually-FT-ing tasks should keep
+            # "cuda" so tabicl can shard activations across visible GPUs.
+            this_task_multi_gpu = args.tabicl_multi_gpu and use_ft_for_this_task
             tabicl_device = (
-                "cuda" if (args.tabicl_multi_gpu and use_ft_for_this_task)
-                else str(accelerator.device)
+                "cuda" if this_task_multi_gpu else str(accelerator.device)
             )
             icl_head = TabICLHead(
                 task_type=task_type,
@@ -1530,7 +1529,7 @@ def _run_icl_evaluation(model, train_dataset, valid_dataset_dict,
                 finetune_n_estimators_validation=args.tabicl_finetune_n_estimators_validation,
                 finetune_eval_metric=args.tabicl_finetune_eval_metric,
                 finetune_output_dir=ft_output_dir,
-                multi_gpu=args.tabicl_multi_gpu,
+                multi_gpu=this_task_multi_gpu,
             )
 
         # Classification tasks: tabicl's FT classifier scatters by labels
