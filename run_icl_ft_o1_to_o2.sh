@@ -15,6 +15,8 @@
 # ~seconds for the zero-shot ICL path.
 
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+# Synchronous CUDA so tracebacks point at the failing op (FT debugging).
+export CUDA_LAUNCH_BLOCKING=1
 
 PYTHONUNBUFFERED=1 python hmaintask_combine_llm.py \
     datasets/joint-v65 logs/icl-ft-o1-to-o2 icl-ft-o1-to-o2 \

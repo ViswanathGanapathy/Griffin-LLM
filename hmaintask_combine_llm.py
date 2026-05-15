@@ -1506,6 +1506,16 @@ def _run_icl_evaluation(model, train_dataset, valid_dataset_dict,
                 finetune_output_dir=ft_output_dir,
             )
 
+        # Classification tasks: tabicl's FT classifier scatters by labels
+        # treated as integer class indices. Our embedding extraction returns
+        # whatever dtype the dataset uses, which is often float32 even for
+        # 0/1 binary tasks — that breaks the scatter index. Coerce to int64
+        # for clf, leave as float for regression.
+        if task_type != "regression":
+            train_labels = train_labels.astype(np.int64)
+            valid_labels = valid_labels.astype(np.int64)
+            test_labels = test_labels.astype(np.int64)
+
         # Diagnostic dump — cheap, useful when FT/ICL paths misbehave on
         # unfamiliar labels.
         if accelerator.is_main_process:
@@ -1515,10 +1525,19 @@ def _run_icl_evaluation(model, train_dataset, valid_dataset_dict,
                 f"min={train_labels.min()} max={train_labels.max()}"
             )
             uniq, cnt = np.unique(train_labels, return_counts=True)
-            print(f"  [LABELS] y_train unique: "
-                  f"{dict(zip(uniq.tolist(), cnt.tolist()))}")
+            # Compact form — full dict was unreadable on multi-class
+            if len(uniq) <= 20:
+                print(f"  [LABELS] y_train unique: "
+                      f"{dict(zip(uniq.tolist(), cnt.tolist()))}")
+            else:
+                print(f"  [LABELS] y_train unique count: {len(uniq)} values "
+                      f"(showing top-5 by frequency)")
+                order = np.argsort(-cnt)[:5]
+                top = {uniq[i].item(): int(cnt[i]) for i in order}
+                print(f"  [LABELS] top-5 (val:count): {top}")
             v_uniq = np.unique(valid_labels)
-            print(f"  [LABELS] y_valid unique: {v_uniq.tolist()}")
+            print(f"  [LABELS] y_valid unique count: {len(v_uniq)}, "
+                  f"min={v_uniq.min()}, max={v_uniq.max()}")
 
         # Fit on train embeddings — pass valid through when fine-tuning so
         # tabicl can use it for early stopping. Only one fit per task.
