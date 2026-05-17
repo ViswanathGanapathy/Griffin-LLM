@@ -39,7 +39,7 @@ PYTHONUNBUFFERED=1 python hmaintask_combine_llm.py \
     --tabicl_finetune_patience 10 \
     --tabicl_finetune_n_estimators_train 1 \
     --tabicl_finetune_n_estimators_validation 1 \
-    --tabicl_finetune_max_data_size 2000 \
+    --tabicl_finetune_max_data_size 5000 \
     --hop 2 --fanout 20 --fewshotfanout 3 \
     --batchsize 256 --lr 1e-4 --wd 2e-4 \
     --hiddim 512 --num_mp 4 --use_rev True --use_gate True \
