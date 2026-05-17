@@ -78,6 +78,7 @@ import accelerate
 import argparse
 import os
 import os.path as osp
+import time
 from typing import Union, Optional
 from metric import compute_metric
 from task_prompts import get_task_description, get_task_question, get_task_reasoning, build_rich_system_prompt, audit_task_prompts
@@ -1578,32 +1579,48 @@ def _run_icl_evaluation(model, train_dataset, valid_dataset_dict,
 
         # Fit on train embeddings — pass valid through when fine-tuning so
         # tabicl can use it for early stopping. Only one fit per task.
+        # Time fit and each predict for KV-cache A/B comparison.
+        _t0 = time.time()
         if args.head == "tabicl" and use_ft_for_this_task:
             icl_head.fit(train_embs, train_labels,
                          X_val=valid_embs, y_val=valid_labels)
         else:
             icl_head.fit(train_embs, train_labels)
+        _t_fit = time.time() - _t0
 
         # Evaluate on valid (NOTE: when fine-tuning, valid was used for early
         # stopping, so this valid score is mildly optimistic — test is the
         # clean held-out metric).
+        _t0 = time.time()
         valid_score = eval_with_icl_head(
             icl_head, train_embs, train_labels,
             valid_embs, valid_labels, metric_name,
         )
+        _t_valid = time.time() - _t0
         print(f"  valid_metric/{tn}/{metric_name}: {valid_score}")
         tbtracker.log(
             {f"valid_metric/{tn}/{metric_name}": valid_score}, step=step,
         )
 
         # Evaluate on test
+        _t0 = time.time()
         test_score = eval_with_icl_head(
             icl_head, train_embs, train_labels,
             test_embs, test_labels, metric_name,
         )
+        _t_test = time.time() - _t0
         print(f"  test_metric/{tn}/{metric_name}: {test_score}")
+        print(f"  [TIMING] {tn}: fit={_t_fit:.2f}s, "
+              f"valid_predict={_t_valid:.2f}s "
+              f"(N={valid_embs.shape[0]}), "
+              f"test_predict={_t_test:.2f}s "
+              f"(N={test_embs.shape[0]}), "
+              f"ctx_rows≈{min(train_embs.shape[0], args.icl_max_context)}")
         tbtracker.log(
-            {f"test_metric/{tn}/{metric_name}": test_score}, step=step,
+            {f"test_metric/{tn}/{metric_name}": test_score,
+             f"timing/{tn}/fit_s": _t_fit,
+             f"timing/{tn}/valid_predict_s": _t_valid,
+             f"timing/{tn}/test_predict_s": _t_test}, step=step,
         )
 
 
