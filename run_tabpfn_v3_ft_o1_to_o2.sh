@@ -1,13 +1,19 @@
 #!/bin/bash
 # TabPFN v3 fine-tune on the o1->o2 transfer.
-# Same probe + extract pipeline as the ZS script; predicts via the
-# KV-cached path after FT.
 #
-# Note: FinetunedTabPFNClassifier/Regressor traditionally hardcoded
-# v2.5 internally — confirm whether v3 is supported via the FT API
-# by running probe_tabpfn.py first. If FT is still v2.5-only, the
-# fair comparison vs the ZS-v3 script becomes "v3 ZS vs v2.5 FT",
-# which is still informative.
+# Important note about TabPFN's FT class (verified via probe_tabpfn.py
+# on tabpfn 8.0.3): the FT class has DIFFERENT knob names than the
+# base TabPFN class. Notably:
+#   - n_finetune_ctx_plus_query_samples = 10000  (default; FT context size)
+#   - n_inference_subsample_samples     = 50000  (default; inference context)
+#   - n_estimators_finetune = 2, n_estimators_validation = 2,
+#     n_estimators_final_inference = 8
+# This already implements the "small FT, big inference" pattern natively.
+#
+# Our TabPFNHead wraps FinetunedTabPFN{Classifier,Regressor} via the
+# existing --tabpfn_finetune path; the new fit_mode / inference_precision
+# CLI flags are no-ops for the FT class (they're filtered out — FT class
+# doesn't accept them) but kept here for documentation.
 #
 # REQUIRES:
 #   pip install --upgrade tabpfn
@@ -28,10 +34,9 @@ PYTHONUNBUFFERED=1 python hmaintask_combine_llm.py \
     --icl_max_context 30000 \
     --icl_n_estimators 8 \
     --tabpfn_version v3 \
-    --tabpfn_kv_cache \
     --tabpfn_finetune \
     --tabpfn_finetune_epochs 30 \
-    --tabpfn_finetune_lr 2e-5 \
+    --tabpfn_finetune_lr 1e-5 \
     --hop 2 --fanout 20 --fewshotfanout 3 \
     --batchsize 256 --lr 1e-4 --wd 2e-4 \
     --hiddim 512 --num_mp 4 --use_rev True --use_gate True \

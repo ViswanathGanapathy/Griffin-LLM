@@ -213,7 +213,10 @@ class TabPFNHead:
         finetune: bool = False,
         finetune_epochs: int = 30,
         finetune_lr: float = 2e-5,
-        use_kv_cache: bool = False,
+        fit_mode: Optional[str] = None,
+        memory_saving_mode: Optional[str] = None,
+        inference_precision: Optional[str] = None,
+        inference_config: Optional[dict] = None,
         inference_extra_kwargs: Optional[dict] = None,
     ):
         self.task_type = task_type
@@ -224,7 +227,10 @@ class TabPFNHead:
         self.finetune = finetune
         self.finetune_epochs = finetune_epochs
         self.finetune_lr = finetune_lr
-        self.use_kv_cache = use_kv_cache
+        self.fit_mode = fit_mode
+        self.memory_saving_mode = memory_saving_mode
+        self.inference_precision = inference_precision
+        self.inference_config = inference_config
         self.inference_extra_kwargs = inference_extra_kwargs or {}
         self.model = None
         self._fitted = False
@@ -313,20 +319,20 @@ class TabPFNHead:
             from tabpfn import TabPFNClassifier, TabPFNRegressor
             cls = TabPFNRegressor if self.task_type == "regression" else TabPFNClassifier
 
-            # Build extra kwargs for v3 / KV-cache features. Filter against
-            # cls.__init__ signature below so older tabpfn releases silently
-            # drop unsupported names.
+            # Build extra kwargs: real tabpfn 8.x knobs (verified via
+            # probe_tabpfn.py). The kwarg filter below drops anything the
+            # installed release doesn't accept.
             extra = {}
-            if self.use_kv_cache:
-                # Try common kwarg names — first one accepted wins.
-                for name, val in (
-                    ("use_kv_cache", True),
-                    ("kv_cache", True),
-                    ("cache_attention", True),
-                    ("cached_for_inference", True),
-                ):
-                    extra[name] = val
+            if self.fit_mode is not None:
+                extra["fit_mode"] = self.fit_mode
+            if self.memory_saving_mode is not None:
+                extra["memory_saving_mode"] = self.memory_saving_mode
+            if self.inference_precision is not None:
+                extra["inference_precision"] = self.inference_precision
+            if self.inference_config is not None:
+                extra["inference_config"] = self.inference_config
             extra.update(self.inference_extra_kwargs)
+
             import inspect
             accepted = set(inspect.signature(cls.__init__).parameters.keys())
             base_kwargs = {"device": self.device, "n_estimators": self.n_estimators}

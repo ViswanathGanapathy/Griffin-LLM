@@ -1472,6 +1472,10 @@ def _run_icl_evaluation(model, train_dataset, valid_dataset_dict,
 
         # Create ICL head
         if args.head == "tabpfn":
+            _inference_cfg = None
+            if args.tabpfn_inference_config is not None:
+                import json as _json
+                _inference_cfg = _json.loads(args.tabpfn_inference_config)
             icl_head = TabPFNHead(
                 task_type=task_type,
                 device=str(accelerator.device),
@@ -1481,7 +1485,10 @@ def _run_icl_evaluation(model, train_dataset, valid_dataset_dict,
                 finetune=args.tabpfn_finetune,
                 finetune_epochs=args.tabpfn_finetune_epochs,
                 finetune_lr=args.tabpfn_finetune_lr,
-                use_kv_cache=args.tabpfn_kv_cache,
+                fit_mode=args.tabpfn_fit_mode,
+                memory_saving_mode=args.tabpfn_memory_saving_mode,
+                inference_precision=args.tabpfn_inference_precision,
+                inference_config=_inference_cfg,
             )
         else:
             # tabicl v2's pretrained classifier supports up to 10 classes.
@@ -2603,13 +2610,27 @@ if __name__ == "__main__":
                              "or default (package default). v3 names are resolved "
                              "dynamically against the installed ModelVersion enum. "
                              "Run probe_tabpfn.py to see which versions are available.")
-    parser.add_argument("--tabpfn_kv_cache", action="store_true", default=False,
-                        help="Enable KV caching on the TabPFN predictor — "
-                             "precomputes context K/V once at fit time and "
-                             "reuses across predict() calls, enabling much "
-                             "larger context at inference. Requires TabPFN v3 "
-                             "or later. Dropped silently if the installed "
-                             "release doesn't expose the kwarg.")
+    # Real tabpfn 8.x knobs (verified via probe_tabpfn.py). The
+    # speculative --tabpfn_kv_cache flag from earlier didn't exist;
+    # KV-cache is engaged via fit_mode='fit_with_cache' instead.
+    parser.add_argument("--tabpfn_fit_mode", type=str, default=None,
+                        help="TabPFN fit_mode. 'fit_preprocessors' (default) "
+                             "fits only the preprocessors; the model itself "
+                             "runs at predict time. 'fit_with_cache' (if "
+                             "available) precomputes the context K/V at fit "
+                             "time so subsequent predict() calls are much "
+                             "faster — the v3 KV-cache path.")
+    parser.add_argument("--tabpfn_memory_saving_mode", type=str, default=None,
+                        help="TabPFN memory_saving_mode. 'auto' (default), "
+                             "'low', 'high'. Lower = less memory, slower.")
+    parser.add_argument("--tabpfn_inference_precision", type=str, default=None,
+                        help="TabPFN inference dtype. 'auto' | 'float32' | "
+                             "'bfloat16' | 'float16'. bf16 halves memory.")
+    parser.add_argument("--tabpfn_inference_config", type=str, default=None,
+                        help="JSON string parsed into a dict and passed to "
+                             "TabPFN's inference_config kwarg. Run "
+                             "probe_tabpfn_inference.py to see what fields "
+                             "InferenceConfig accepts in your tabpfn release.")
     parser.add_argument("--tabpfn_finetune", action="store_true", default=False,
                         help="Fine-tune TabPFN on Griffin embeddings "
                              "(uses FinetunedTabPFNClassifier/Regressor)")
