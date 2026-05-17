@@ -1481,6 +1481,7 @@ def _run_icl_evaluation(model, train_dataset, valid_dataset_dict,
                 finetune=args.tabpfn_finetune,
                 finetune_epochs=args.tabpfn_finetune_epochs,
                 finetune_lr=args.tabpfn_finetune_lr,
+                use_kv_cache=args.tabpfn_kv_cache,
             )
         else:
             # tabicl v2's pretrained classifier supports up to 10 classes.
@@ -2598,8 +2599,17 @@ if __name__ == "__main__":
 
     # ── TabPFN / TabICL (only for --head tabpfn or tabicl) ──
     parser.add_argument("--tabpfn_version", type=str, default="v2.5",
-                        choices=["v2.5", "v2.6", "default"],
-                        help="TabPFN model version: v2.5, v2.6, or default (package default)")
+                        help="TabPFN model version: v2.5, v2.6, v3, v3.0, v3.1, "
+                             "or default (package default). v3 names are resolved "
+                             "dynamically against the installed ModelVersion enum. "
+                             "Run probe_tabpfn.py to see which versions are available.")
+    parser.add_argument("--tabpfn_kv_cache", action="store_true", default=False,
+                        help="Enable KV caching on the TabPFN predictor — "
+                             "precomputes context K/V once at fit time and "
+                             "reuses across predict() calls, enabling much "
+                             "larger context at inference. Requires TabPFN v3 "
+                             "or later. Dropped silently if the installed "
+                             "release doesn't expose the kwarg.")
     parser.add_argument("--tabpfn_finetune", action="store_true", default=False,
                         help="Fine-tune TabPFN on Griffin embeddings "
                              "(uses FinetunedTabPFNClassifier/Regressor)")

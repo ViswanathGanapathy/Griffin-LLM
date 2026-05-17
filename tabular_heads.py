@@ -213,6 +213,8 @@ class TabPFNHead:
         finetune: bool = False,
         finetune_epochs: int = 30,
         finetune_lr: float = 2e-5,
+        use_kv_cache: bool = False,
+        inference_extra_kwargs: Optional[dict] = None,
     ):
         self.task_type = task_type
         self.device = device
@@ -222,22 +224,45 @@ class TabPFNHead:
         self.finetune = finetune
         self.finetune_epochs = finetune_epochs
         self.finetune_lr = finetune_lr
+        self.use_kv_cache = use_kv_cache
+        self.inference_extra_kwargs = inference_extra_kwargs or {}
         self.model = None
         self._fitted = False
 
     def _resolve_model_version(self):
-        """Map version string to TabPFN ModelVersion enum."""
+        """Map version string to TabPFN ModelVersion enum.
+
+        Probe the installed ModelVersion enum at runtime for v3-named
+        members so this keeps working across tabpfn releases that may
+        name v3 differently (V3, V3_0, V3_1, etc.).
+        """
         if self.model_version == "default":
             return None  # let TabPFN pick its default
         from tabpfn.constants import ModelVersion
+        # Static mappings we know about
         version_map = {
-            "v2.5": ModelVersion.V2_5,
-            "v2.6": ModelVersion.V2_6,
+            "v2.5": getattr(ModelVersion, "V2_5", None),
+            "v2.6": getattr(ModelVersion, "V2_6", None),
         }
-        if self.model_version not in version_map:
+        # Dynamic v3 lookup — accept any of: v3, v3.0, v3.1 by matching
+        # ModelVersion members that start with V3.
+        if self.model_version.lower().startswith("v3"):
+            target = self.model_version.upper().replace(".", "_")  # v3.1 -> V3_1
+            candidate = getattr(ModelVersion, target, None)
+            if candidate is None:
+                # Try just "V3" or any "V3_*"
+                for m in dir(ModelVersion):
+                    if m.upper().startswith("V3"):
+                        candidate = getattr(ModelVersion, m)
+                        logger.info(f"[TabPFN] Resolved {self.model_version} -> ModelVersion.{m}")
+                        break
+            version_map[self.model_version] = candidate
+        if (self.model_version not in version_map or
+                version_map[self.model_version] is None):
             raise ValueError(
                 f"Unknown TabPFN version '{self.model_version}'. "
-                f"Choose from: {list(version_map.keys())} or 'default'"
+                f"Available ModelVersion members: "
+                f"{[m for m in dir(__import__('tabpfn.constants', fromlist=['ModelVersion']).ModelVersion) if not m.startswith('_')]}"
             )
         return version_map[self.model_version]
 
@@ -286,33 +311,41 @@ class TabPFNHead:
                 )
         else:
             from tabpfn import TabPFNClassifier, TabPFNRegressor
+            cls = TabPFNRegressor if self.task_type == "regression" else TabPFNClassifier
+
+            # Build extra kwargs for v3 / KV-cache features. Filter against
+            # cls.__init__ signature below so older tabpfn releases silently
+            # drop unsupported names.
+            extra = {}
+            if self.use_kv_cache:
+                # Try common kwarg names — first one accepted wins.
+                for name, val in (
+                    ("use_kv_cache", True),
+                    ("kv_cache", True),
+                    ("cache_attention", True),
+                    ("cached_for_inference", True),
+                ):
+                    extra[name] = val
+            extra.update(self.inference_extra_kwargs)
+            import inspect
+            accepted = set(inspect.signature(cls.__init__).parameters.keys())
+            base_kwargs = {"device": self.device, "n_estimators": self.n_estimators}
+            for k, v in extra.items():
+                if k in accepted:
+                    base_kwargs[k] = v
+                else:
+                    logger.warning(
+                        f"[TabPFN] installed tabpfn does not accept '{k}'; dropped."
+                    )
+
             if model_version is not None:
                 # Use create_default_for_version() — the correct API.
-                # Overrides are passed as **kwargs (device, n_estimators).
-                if self.task_type == "regression":
-                    self.model = TabPFNRegressor.create_default_for_version(
-                        model_version,
-                        device=self.device,
-                        n_estimators=self.n_estimators,
-                    )
-                else:
-                    self.model = TabPFNClassifier.create_default_for_version(
-                        model_version,
-                        device=self.device,
-                        n_estimators=self.n_estimators,
-                    )
+                self.model = cls.create_default_for_version(
+                    model_version, **base_kwargs,
+                )
             else:
-                # "default" — use package default (currently v2.6)
-                if self.task_type == "regression":
-                    self.model = TabPFNRegressor(
-                        device=self.device,
-                        n_estimators=self.n_estimators,
-                    )
-                else:
-                    self.model = TabPFNClassifier(
-                        device=self.device,
-                        n_estimators=self.n_estimators,
-                    )
+                # "default" — use package default
+                self.model = cls(**base_kwargs)
         logger.info(f"[TabPFN] Created {'finetuned ' if self.finetune else ''}"
                      f"{'regressor' if self.task_type == 'regression' else 'classifier'}"
                      f" (version={self.model_version})")
