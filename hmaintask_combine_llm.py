@@ -1473,6 +1473,23 @@ def _run_icl_evaluation(model, train_dataset, valid_dataset_dict,
 
         # Create ICL head
         if args.head == "tabpfn":
+            # TabPFN's classifier (incl. the FT variant) is capped at 10
+            # classes by its label encoder. Tasks with more (e.g.,
+            # airbnb-destination has 12) raise TabPFNValidationError
+            # inside the FT loop. Fall back to ZS for those — ZS's
+            # predict_proba tolerates up to MAX_NUMBER_OF_CLASSES.
+            TABPFN_FT_MAX_CLASSES = 10
+            use_ft_for_this_task = args.tabpfn_finetune
+            if (use_ft_for_this_task and task_type != "regression"):
+                num_classes = int(np.unique(train_labels).size)
+                if num_classes > TABPFN_FT_MAX_CLASSES:
+                    print(
+                        f"  [WARN] {tn}: {num_classes} classes exceeds "
+                        f"TabPFN FT cap ({TABPFN_FT_MAX_CLASSES}); falling "
+                        f"back to zero-shot ICL for this task."
+                    )
+                    use_ft_for_this_task = False
+
             _inference_cfg = None
             if args.tabpfn_inference_config is not None:
                 import json as _json
@@ -1483,7 +1500,7 @@ def _run_icl_evaluation(model, train_dataset, valid_dataset_dict,
                 n_estimators=args.icl_n_estimators,
                 max_context_size=args.icl_max_context,
                 model_version=args.tabpfn_version,
-                finetune=args.tabpfn_finetune,
+                finetune=use_ft_for_this_task,
                 finetune_epochs=args.tabpfn_finetune_epochs,
                 finetune_lr=args.tabpfn_finetune_lr,
                 fit_mode=args.tabpfn_fit_mode,
