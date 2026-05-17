@@ -320,15 +320,24 @@ class TabPFNHead:
             cls = TabPFNRegressor if self.task_type == "regression" else TabPFNClassifier
 
             # Build extra kwargs: real tabpfn 8.x knobs (verified via
-            # probe_tabpfn.py). The kwarg filter below drops anything the
-            # installed release doesn't accept.
+            # probe_tabpfn.py + probe_tabpfn_inference.py). The kwarg
+            # filter below drops anything the installed release doesn't
+            # accept.
             extra = {}
             if self.fit_mode is not None:
                 extra["fit_mode"] = self.fit_mode
             if self.memory_saving_mode is not None:
                 extra["memory_saving_mode"] = self.memory_saving_mode
             if self.inference_precision is not None:
-                extra["inference_precision"] = self.inference_precision
+                # tabpfn accepts torch.dtype | 'autocast' | 'auto'.
+                # Convert common dtype names to torch dtypes for CLI ergonomics.
+                dtype_aliases = {
+                    "bfloat16": torch.bfloat16, "bf16": torch.bfloat16,
+                    "float16":  torch.float16,  "fp16": torch.float16,
+                    "float32":  torch.float32,  "fp32": torch.float32,
+                }
+                ip = self.inference_precision
+                extra["inference_precision"] = dtype_aliases.get(ip, ip)
             if self.inference_config is not None:
                 extra["inference_config"] = self.inference_config
             extra.update(self.inference_extra_kwargs)

@@ -1,21 +1,22 @@
 #!/bin/bash
 # TabPFN v3 zero-shot ICL on the o1->o2 transfer.
-# Uses fit_mode=fit_with_cache (the v3 KV-cache path) to make predict()
-# fast at large context. inference_precision=bfloat16 halves memory.
 #
-# Confirmed via probe_tabpfn.py: tabpfn 8.0.3 has ModelVersion.V3 and
-# accepts fit_mode + memory_saving_mode + inference_precision +
-# inference_config kwargs.
-#
-# REQUIRES on the runner:
-#   pip install --upgrade tabpfn    (already 8.0.3)
+# Verified via probe_tabpfn_inference.py (tabpfn 8.0.3):
+#   - fit_mode accepts: 'low_memory' | 'fit_preprocessors' |
+#                       'fit_with_cache' | 'batched'
+#     fit_with_cache is the v3 KV-cache path: precompute context K/V
+#     once at fit() time; predict() reuses.
+#   - inference_precision: torch.dtype | 'autocast' | 'auto'.
+#     'autocast' auto-picks bf16/fp16 on A100/H100; the cleanest CLI
+#     choice. Our TabPFNHead also accepts strings like 'bfloat16' and
+#     converts them to torch dtypes.
+#   - inference_config: dict with UPPERCASE keys (matching the
+#     InferenceConfig dataclass fields). MAX_NUMBER_OF_SAMPLES is the
+#     hard cap on context rows — bump above the default so 30K context
+#     actually goes through.
 #
 # Usage:
 #   ./run_tabpfn_v3_zs_o1_to_o2.sh 2>&1 | tee logs/tabpfn-v3-zs-o1-to-o2.log
-#
-# If fit_with_cache isn't a valid fit_mode in your tabpfn release, you'll
-# see a clear error from tabpfn; check `python3 probe_tabpfn_inference.py`
-# for the literal-typed valid values.
 
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 
@@ -31,7 +32,8 @@ PYTHONUNBUFFERED=1 python hmaintask_combine_llm.py \
     --icl_n_estimators 8 \
     --tabpfn_version v3 \
     --tabpfn_fit_mode fit_with_cache \
-    --tabpfn_inference_precision bfloat16 \
+    --tabpfn_inference_precision autocast \
+    --tabpfn_inference_config '{"MAX_NUMBER_OF_SAMPLES": 50000}' \
     --hop 2 --fanout 20 --fewshotfanout 3 \
     --batchsize 256 --lr 1e-4 --wd 2e-4 \
     --hiddim 512 --num_mp 4 --use_rev True --use_gate True \
