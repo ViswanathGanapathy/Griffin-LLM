@@ -68,7 +68,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from hdataset import Graph, Task
 from hloaderwrapper import LoaderWrapperTask, LoaderWrapperTaskLLM
-from hmodel import GriffinMod
+from hmodel import GriffinMod as _GriffinVanilla
+try:
+    from hmodel_smpnn import GriffinMod as _GriffinSMPNN
+except ImportError:
+    _GriffinSMPNN = None
 from torch.utils.data import DataLoader
 from accelerate import Accelerator
 from accelerate.utils import ProjectConfiguration
@@ -1654,11 +1658,30 @@ def main(args):
     tbtracker = accelerator.get_tracker("tensorboard")
 
     # ── Griffin MPNN ──
-    model = GriffinMod(
-        hiddim=args.hiddim, num_mp=args.num_mp,
-        use_rev=args.use_rev, use_gate=args.use_gate,
-    )
+    # Pick vanilla vs SMPNN backbone. SMPNN adds Pre-LN per sub-block +
+    # learnable alpha scaling (init 1e-6 = near-identity), enabling
+    # deeper GNN stacks without oversmoothing.
+    if args.use_smpnn:
+        if _GriffinSMPNN is None:
+            raise ImportError(
+                "--use_smpnn requested but hmodel_smpnn.py is not importable."
+            )
+        print(f"[Griffin] Using SMPNN backbone (alpha_init={args.alpha_init})")
+        model = _GriffinSMPNN(
+            hiddim=args.hiddim, num_mp=args.num_mp,
+            use_rev=args.use_rev, use_gate=args.use_gate,
+            alpha_init=args.alpha_init,
+        )
+    else:
+        model = _GriffinVanilla(
+            hiddim=args.hiddim, num_mp=args.num_mp,
+            use_rev=args.use_rev, use_gate=args.use_gate,
+        )
     if args.loadpath is not None:
+        # When --use_smpnn + vanilla checkpoint, the SMPNN-only params
+        # (ln_gnn, ln_ff, alpha_gnn, alpha_ff) won't be in the checkpoint
+        # and default-init to near-identity (alpha=1e-6). accelerate warns
+        # about missing keys but does not fail.
         accelerate.load_checkpoint_in_model(model, args.loadpath)
 
     # ── Head-specific components ──
@@ -2568,6 +2591,16 @@ if __name__ == "__main__":
     parser.add_argument("--hop", type=int, default=2)
     parser.add_argument("--use_rev", type=str2bool, default=True)
     parser.add_argument("--use_gate", type=str2bool, default=True)
+    parser.add_argument("--use_smpnn", action="store_true", default=False,
+                        help="Use the SMPNN backbone (hmodel_smpnn.py) instead "
+                             "of vanilla Griffin. SMPNN adds per-sub-block "
+                             "Pre-LN + learnable alpha scaling (init 1e-6), "
+                             "enabling deeper GNNs without oversmoothing.")
+    parser.add_argument("--alpha_init", type=float, default=1e-6,
+                        help="Initial value for SMPNN's learnable alpha "
+                             "scaling. 1e-6 = near-identity init (paper "
+                             "default). Increase for faster ramp-up if "
+                             "training plateaus early.")
 
     # ── LLM-specific (only used when --head is llm or llm_mlp) ──
     parser.add_argument("--llm_model", type=str,
