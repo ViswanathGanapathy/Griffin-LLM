@@ -2,7 +2,11 @@ import torch
 import torch.nn.functional as F
 from hdataset import Graph, Task
 from hloaderwrapper import LoaderWrapperTask
-from hmodel import GriffinMod
+from hmodel import GriffinMod as _GriffinVanilla
+try:
+    from hmodel_smpnn import GriffinMod as _GriffinSMPNN
+except ImportError:
+    _GriffinSMPNN = None
 from torch.utils.data import DataLoader
 from accelerate import Accelerator
 from accelerate.utils import ProjectConfiguration
@@ -108,7 +112,28 @@ def main(args):
     accelerator.init_trackers(args.logname)
     tbtracker = accelerator.get_tracker("tensorboard")
 
-    model = GriffinMod(hiddim=args.hiddim, num_mp=args.num_mp, use_rev=args.use_rev, use_gate=args.use_gate)
+    # Pick vanilla vs SMPNN backbone. SMPNN-Griffin (hmodel_smpnn.py) adds
+    # Pre-LN per sub-block + learnable alpha scaling (init 1e-6 = near-
+    # identity), enabling deeper GNN stacks without oversmoothing. Vanilla
+    # checkpoints warm-start cleanly because SMPNN-only params are missing
+    # in the checkpoint and default-init to near-identity.
+    if args.use_smpnn:
+        if _GriffinSMPNN is None:
+            raise ImportError(
+                "--use_smpnn requested but hmodel_smpnn.py is not importable."
+            )
+        print(f"[Griffin] Using SMPNN backbone (alpha_init={args.alpha_init}, "
+              f"num_mp={args.num_mp})")
+        model = _GriffinSMPNN(
+            hiddim=args.hiddim, num_mp=args.num_mp,
+            use_rev=args.use_rev, use_gate=args.use_gate,
+            alpha_init=args.alpha_init,
+        )
+    else:
+        model = _GriffinVanilla(
+            hiddim=args.hiddim, num_mp=args.num_mp,
+            use_rev=args.use_rev, use_gate=args.use_gate,
+        )
     if args.loadpath is not None:
         accelerate.load_checkpoint_in_model(model, args.loadpath)
     # model.reset_parameters()
@@ -189,6 +214,20 @@ def main(args):
     for epoch in range(args.maxepoch):
         if accelerator.is_main_process:
             print(f"Epoch {epoch} starts")
+            # SMPNN diagnostic: print alpha values periodically so we can
+            # verify the learnable scalings are actually ramping up from
+            # their 1e-6 init (otherwise the extra layers see no signal).
+            _m = accelerator.unwrap_model(model)
+            if (args.log_alpha_every > 0
+                    and hasattr(_m, "alpha_gnn")
+                    and epoch % args.log_alpha_every == 0):
+                pieces = []
+                for i in range(_m.num_mp):
+                    pieces.append(
+                        f"L{i}(gnn={_m.alpha_gnn[i].item():.2e},"
+                        f"ff={_m.alpha_ff[i].item():.2e})"
+                    )
+                print("  [alpha] " + " ".join(pieces))
         dataset.rebuild_indice(accelerator)
         loader = DataLoader(
             dataset,
@@ -338,6 +377,18 @@ if __name__ == "__main__":
     parser.add_argument("--hop", type=int, default=2)
     parser.add_argument("--use_rev", type=str2bool, default=True)
     parser.add_argument("--use_gate", type=str2bool, default=True)
+    parser.add_argument("--use_smpnn", action="store_true", default=False,
+                        help="Use SMPNN backbone (hmodel_smpnn.py). "
+                             "Adds Pre-LN per sub-block + learnable alpha "
+                             "scaling. Enables deeper GNN (num_mp >= 6) "
+                             "without oversmoothing.")
+    parser.add_argument("--alpha_init", type=float, default=1e-6,
+                        help="SMPNN alpha scaling init. 1e-6 = "
+                             "near-identity (paper default).")
+    parser.add_argument("--log_alpha_every", type=int, default=0,
+                        help="If > 0, print SMPNN alpha values every N "
+                             "epochs. Helpful diagnostic to confirm the "
+                             "scaling is actually ramping up.")
 
     args = parser.parse_args()
     args.eval_batchsize = args.batchsize if args.eval_batchsize is None else args.eval_batchsize
