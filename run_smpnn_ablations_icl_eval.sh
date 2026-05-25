@@ -23,23 +23,33 @@
 set -e
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 
-# Each entry: TAG | CKPT_DIR | BACKBONE_FLAGS
-# BACKBONE_FLAGS must match the training-time flags exactly so the
-# checkpoint state-dict loads cleanly.
+# Each entry: TAG | CKPT_DIR | BACKBONE_FLAGS | DATA_FLAGS
+# BACKBONE_FLAGS must match the training-time backbone-construction flags
+# exactly so the checkpoint state-dict loads cleanly.
+# DATA_FLAGS must match the training-time data-loader config (hop / fanout)
+# so the eval-time subgraphs look like what the model saw at training.
+DEFAULT_DATA="--hop 2 --fanout 20 --fewshotfanout 3"
+HOP3_DATA="--hop 3 --fanout 10 --fewshotfanout 3"
+
 BACKBONES=(
-    # Existing depth-scan checkpoints (run_smpnn_depth_native.sh).
-    "depth-vanilla-4|checkpoints/smpnn-depth-vanilla-4/best_checkpoint|--num_mp 4"
-    "depth-smpnn-4|checkpoints/smpnn-depth-smpnn-4/best_checkpoint|--num_mp 4 --use_smpnn"
-    "depth-smpnn-6|checkpoints/smpnn-depth-smpnn-6/best_checkpoint|--num_mp 6 --use_smpnn"
-    "depth-smpnn-8|checkpoints/smpnn-depth-smpnn-8/best_checkpoint|--num_mp 8 --use_smpnn"
-    # New ablation checkpoints (run_smpnn_ablations.sh).
-    "c3-vanilla-6|checkpoints/smpnn-ablation-c3-vanilla-6/best_checkpoint|--num_mp 6"
-    "a2-no-alpha|checkpoints/smpnn-ablation-a2-no-alpha/best_checkpoint|--num_mp 6 --use_smpnn --use_alpha False"
-    "a3-no-ff|checkpoints/smpnn-ablation-a3-no-ff/best_checkpoint|--num_mp 6 --use_smpnn --use_ff False"
-    "a4-no-gnn-ln|checkpoints/smpnn-ablation-a4-no-gnn-ln/best_checkpoint|--num_mp 6 --use_smpnn --use_gnn_ln False"
-    "d2-alpha-1e-4|checkpoints/smpnn-ablation-d2-alpha-1e-4/best_checkpoint|--num_mp 6 --use_smpnn --alpha_init 1e-4"
-    "d3-alpha-1e-2|checkpoints/smpnn-ablation-d3-alpha-1e-2/best_checkpoint|--num_mp 6 --use_smpnn --alpha_init 1e-2"
-    "b1-attn-1h|checkpoints/smpnn-ablation-b1-attn-1h/best_checkpoint|--num_mp 6 --use_smpnn --use_attention True --num_heads 1"
+    # Existing depth-scan checkpoints (run_smpnn_depth_native.sh, hop=2).
+    "depth-vanilla-4|checkpoints/smpnn-depth-vanilla-4/best_checkpoint|--num_mp 4|$DEFAULT_DATA"
+    "depth-smpnn-4|checkpoints/smpnn-depth-smpnn-4/best_checkpoint|--num_mp 4 --use_smpnn|$DEFAULT_DATA"
+    "depth-smpnn-6|checkpoints/smpnn-depth-smpnn-6/best_checkpoint|--num_mp 6 --use_smpnn|$DEFAULT_DATA"
+    "depth-smpnn-8|checkpoints/smpnn-depth-smpnn-8/best_checkpoint|--num_mp 8 --use_smpnn|$DEFAULT_DATA"
+    # New ablation checkpoints (run_smpnn_ablations.sh, hop=2).
+    "c3-vanilla-6|checkpoints/smpnn-ablation-c3-vanilla-6/best_checkpoint|--num_mp 6|$DEFAULT_DATA"
+    "a2-no-alpha|checkpoints/smpnn-ablation-a2-no-alpha/best_checkpoint|--num_mp 6 --use_smpnn --use_alpha False|$DEFAULT_DATA"
+    "a3-no-ff|checkpoints/smpnn-ablation-a3-no-ff/best_checkpoint|--num_mp 6 --use_smpnn --use_ff False|$DEFAULT_DATA"
+    "a4-no-gnn-ln|checkpoints/smpnn-ablation-a4-no-gnn-ln/best_checkpoint|--num_mp 6 --use_smpnn --use_gnn_ln False|$DEFAULT_DATA"
+    "d2-alpha-1e-4|checkpoints/smpnn-ablation-d2-alpha-1e-4/best_checkpoint|--num_mp 6 --use_smpnn --alpha_init 1e-4|$DEFAULT_DATA"
+    "d3-alpha-1e-2|checkpoints/smpnn-ablation-d3-alpha-1e-2/best_checkpoint|--num_mp 6 --use_smpnn --alpha_init 1e-2|$DEFAULT_DATA"
+    "b1-attn-1h|checkpoints/smpnn-ablation-b1-attn-1h/best_checkpoint|--num_mp 6 --use_smpnn --use_attention True --num_heads 1|$DEFAULT_DATA"
+    # Hop=3 backbones (run_smpnn_hop3_native.sh). The with/without-transformer
+    # pair at extended reach -- answers whether attention helps when 3-hop
+    # subgraphs already give the model longer relational paths.
+    "hop3-smpnn-6|checkpoints/smpnn-hop3-smpnn-6-hop3/best_checkpoint|--num_mp 6 --use_smpnn|$HOP3_DATA"
+    "hop3-smpnn-6-attn-1h|checkpoints/smpnn-hop3-smpnn-6-hop3-attn-1h/best_checkpoint|--num_mp 6 --use_smpnn --use_attention True --num_heads 1|$HOP3_DATA"
 )
 
 eval_one() {
@@ -47,15 +57,17 @@ eval_one() {
     local HEAD=$2           # tabpfn | tabicl
     local CKPT=$3           # backbone checkpoint path
     local BACKBONE_FLAGS=$4 # flags that recreate the backbone for ckpt loading
-    local EXTRA_FLAGS=$5    # head-specific knobs
+    local DATA_FLAGS=$5     # --hop / --fanout / --fewshotfanout matching training
+    local EXTRA_FLAGS=$6    # head-specific knobs
 
     local RUN_TAG="${TAG}-${HEAD}-noproj"
     echo ""
     echo "================================================"
     echo ">>> $RUN_TAG"
-    echo "    ckpt:   $CKPT"
-    echo "    head:   $HEAD"
-    echo "    bbflags:$BACKBONE_FLAGS"
+    echo "    ckpt:    $CKPT"
+    echo "    head:    $HEAD"
+    echo "    bbflags: $BACKBONE_FLAGS"
+    echo "    data:    $DATA_FLAGS"
     echo "================================================"
 
     if [ ! -d "$CKPT" ]; then
@@ -70,10 +82,10 @@ eval_one() {
         --eval_tasks others-1 \
         --loadpath $CKPT \
         $BACKBONE_FLAGS \
+        $DATA_FLAGS \
         --no_icl_projection \
         --probe_epochs 0 \
         --hiddim 512 --use_rev True --use_gate True \
-        --hop 2 --fanout 20 --fewshotfanout 3 \
         --batchsize 256 \
         --output_mlp_dim 1 --no_target_normalize \
         $EXTRA_FLAGS \
@@ -96,9 +108,9 @@ TABICL_FLAGS=(
 )
 
 for entry in "${BACKBONES[@]}"; do
-    IFS='|' read -r TAG CKPT BACKBONE_FLAGS <<< "$entry"
-    eval_one "$TAG" "tabpfn" "$CKPT" "$BACKBONE_FLAGS" "${TABPFN_FLAGS[*]}"
-    eval_one "$TAG" "tabicl" "$CKPT" "$BACKBONE_FLAGS" "${TABICL_FLAGS[*]}"
+    IFS='|' read -r TAG CKPT BACKBONE_FLAGS DATA_FLAGS <<< "$entry"
+    eval_one "$TAG" "tabpfn" "$CKPT" "$BACKBONE_FLAGS" "$DATA_FLAGS" "${TABPFN_FLAGS[*]}"
+    eval_one "$TAG" "tabicl" "$CKPT" "$BACKBONE_FLAGS" "$DATA_FLAGS" "${TABICL_FLAGS[*]}"
 done
 
 echo ""
