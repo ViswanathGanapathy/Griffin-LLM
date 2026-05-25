@@ -1666,17 +1666,27 @@ def main(args):
             raise ImportError(
                 "--use_smpnn requested but hmodel_smpnn.py is not importable."
             )
-        print(f"[Griffin] Using SMPNN backbone (alpha_init={args.alpha_init})")
+        print(
+            f"[Griffin] Using SMPNN backbone (num_mp={args.num_mp}, "
+            f"alpha_init={args.alpha_init}, use_alpha={args.use_alpha}, "
+            f"use_ff={args.use_ff}, use_gnn_ln={args.use_gnn_ln}, "
+            f"use_attention={args.use_attention}, num_heads={args.num_heads})"
+        )
         model = _GriffinSMPNN(
             hiddim=args.hiddim, num_mp=args.num_mp,
             use_rev=args.use_rev, use_gate=args.use_gate,
             alpha_init=args.alpha_init,
+            use_attention=args.use_attention, num_heads=args.num_heads,
+            use_alpha=args.use_alpha, use_ff=args.use_ff,
+            use_gnn_ln=args.use_gnn_ln,
         )
     else:
         model = _GriffinVanilla(
             hiddim=args.hiddim, num_mp=args.num_mp,
             use_rev=args.use_rev, use_gate=args.use_gate,
         )
+    _n_params = sum(p.numel() for p in model.parameters())
+    print(f"[Params] Griffin total={_n_params:,}")
     if args.loadpath is not None:
         # When --use_smpnn + vanilla checkpoint, the SMPNN-only params
         # (ln_gnn, ln_ff, alpha_gnn, alpha_ff) won't be in the checkpoint
@@ -2618,6 +2628,20 @@ if __name__ == "__main__":
                              "scaling. 1e-6 = near-identity init (paper "
                              "default). Increase for faster ramp-up if "
                              "training plateaus early.")
+    # SMPNN ablation flags. Must match the backbone training config so the
+    # checkpoint loads cleanly. Adding these here mirrors hmaintask_combine.py.
+    parser.add_argument("--use_attention", type=str2bool, default=False,
+                        help="SMPNN-B: enable parallel linear global attention "
+                             "(paper Appendix A).")
+    parser.add_argument("--num_heads", type=int, default=1,
+                        help="Number of attention heads when --use_attention.")
+    parser.add_argument("--use_alpha", type=str2bool, default=True,
+                        help="SMPNN-A2: enable learnable alpha scaling. "
+                             "False fixes alpha=1 on both sub-blocks.")
+    parser.add_argument("--use_ff", type=str2bool, default=True,
+                        help="SMPNN-A3: enable pointwise feedforward sub-block.")
+    parser.add_argument("--use_gnn_ln", type=str2bool, default=True,
+                        help="SMPNN-A4: enable Pre-LayerNorm before GNN.")
 
     # ── LLM-specific (only used when --head is llm or llm_mlp) ──
     parser.add_argument("--llm_model", type=str,
