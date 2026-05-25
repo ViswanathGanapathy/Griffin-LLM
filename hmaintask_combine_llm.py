@@ -1701,17 +1701,27 @@ def main(args):
         # ICL heads: trainable projection + optional linear probe for
         # Griffin fine-tuning. dec is kept for evaluation fallback.
         dec = getfloatdec(args.hiddim)
-        icl_projection = ICLProjection(
-            in_dim=args.hiddim,
-            out_dim=args.icl_proj_dim,
-            dropout=0.1,
-        )
-        if args.probe_epochs > 0:
-            # Linear probe operates on projected dim, not raw Griffin dim
-            linear_probe = LinearProbe(
-                in_dim=args.icl_proj_dim,
-                out_dim=args.output_mlp_dim,
+        if args.no_icl_projection:
+            # Bypass the 512->128 projection. TabPFN/TabICL consume the raw
+            # Griffin embedding (hiddim-dim features). Skips the probe phase
+            # entirely since there's nothing trainable left to probe-tune.
+            icl_projection = None
+            if args.probe_epochs > 0:
+                print(f"[NOTE] --no_icl_projection set; ignoring "
+                      f"--probe_epochs {args.probe_epochs} "
+                      f"(no projection to train).")
+        else:
+            icl_projection = ICLProjection(
+                in_dim=args.hiddim,
+                out_dim=args.icl_proj_dim,
+                dropout=0.1,
             )
+            if args.probe_epochs > 0:
+                # Linear probe operates on projected dim, not raw Griffin dim
+                linear_probe = LinearProbe(
+                    in_dim=args.icl_proj_dim,
+                    out_dim=args.output_mlp_dim,
+                )
 
     else:
         # LLM heads: build projector + LLM
@@ -1932,7 +1942,8 @@ def main(args):
                 print("[Griffin] Frozen — using pretrained weights only")
         else:
             trainable_params.extend(model.parameters())
-        trainable_params.extend(icl_projection.parameters())
+        if icl_projection is not None:
+            trainable_params.extend(icl_projection.parameters())
         if linear_probe is not None:
             trainable_params.extend(linear_probe.parameters())
 
@@ -2009,13 +2020,19 @@ def main(args):
     if args.head == "default":
         model, dec, optimizer = accelerator.prepare(model, dec, optimizer)
     elif args.head in ("tabpfn", "tabicl"):
-        if linear_probe is not None:
+        # icl_projection may be None when --no_icl_projection is set
+        if linear_probe is not None and icl_projection is not None:
             model, dec, icl_projection, linear_probe, optimizer = accelerator.prepare(
                 model, dec, icl_projection, linear_probe, optimizer,
             )
-        else:
+        elif icl_projection is not None:
             model, dec, icl_projection, optimizer = accelerator.prepare(
                 model, dec, icl_projection, optimizer,
+            )
+        else:
+            # No projection, no probe — just Griffin
+            model, dec, optimizer = accelerator.prepare(
+                model, dec, optimizer,
             )
     else:
         # Move pooling modules to the right device (and DDP-wrap if needed)
@@ -2765,6 +2782,15 @@ if __name__ == "__main__":
     parser.add_argument("--icl_proj_dim", type=int, default=128,
                         help="Output dimension of ICL projection layer "
                              "(compresses Griffin hiddim → this dim for TabPFN/TabICL)")
+    parser.add_argument("--no_icl_projection", action="store_true", default=False,
+                        help="Bypass the ICLProjection between Griffin and "
+                             "TabPFN/TabICL. The head consumes raw "
+                             "Griffin embeddings (--hiddim features). "
+                             "Skips the probe phase entirely. Useful to "
+                             "test whether the 512→128 compression is "
+                             "helping or hurting cross-task transfer. "
+                             "For TabPFN: bump MAX_NUMBER_OF_FEATURES in "
+                             "--tabpfn_inference_config to >= hiddim.")
     parser.add_argument("--icl_max_context", type=int, default=10000,
                         help="Max ICL context examples (subsampled if training "
                              "set exceeds this). TabPFN default: 10000")
