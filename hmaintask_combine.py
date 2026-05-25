@@ -122,18 +122,28 @@ def main(args):
             raise ImportError(
                 "--use_smpnn requested but hmodel_smpnn.py is not importable."
             )
-        print(f"[Griffin] Using SMPNN backbone (alpha_init={args.alpha_init}, "
-              f"num_mp={args.num_mp})")
+        print(
+            f"[Griffin] Using SMPNN backbone (num_mp={args.num_mp}, "
+            f"alpha_init={args.alpha_init}, use_alpha={args.use_alpha}, "
+            f"use_ff={args.use_ff}, use_gnn_ln={args.use_gnn_ln}, "
+            f"use_attention={args.use_attention}, num_heads={args.num_heads})"
+        )
         model = _GriffinSMPNN(
             hiddim=args.hiddim, num_mp=args.num_mp,
             use_rev=args.use_rev, use_gate=args.use_gate,
             alpha_init=args.alpha_init,
+            use_attention=args.use_attention, num_heads=args.num_heads,
+            use_alpha=args.use_alpha, use_ff=args.use_ff,
+            use_gnn_ln=args.use_gnn_ln,
         )
     else:
         model = _GriffinVanilla(
             hiddim=args.hiddim, num_mp=args.num_mp,
             use_rev=args.use_rev, use_gate=args.use_gate,
         )
+    n_params = sum(p.numel() for p in model.parameters())
+    n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"[Params] Griffin total={n_params:,} trainable={n_trainable:,}")
     if args.loadpath is not None:
         accelerate.load_checkpoint_in_model(model, args.loadpath)
     # model.reset_parameters()
@@ -219,14 +229,16 @@ def main(args):
             # their 1e-6 init (otherwise the extra layers see no signal).
             _m = accelerator.unwrap_model(model)
             if (args.log_alpha_every > 0
-                    and hasattr(_m, "alpha_gnn")
+                    and getattr(_m, "use_alpha", False)
                     and epoch % args.log_alpha_every == 0):
                 pieces = []
                 for i in range(_m.num_mp):
-                    pieces.append(
-                        f"L{i}(gnn={_m.alpha_gnn[i].item():.2e},"
-                        f"ff={_m.alpha_ff[i].item():.2e})"
-                    )
+                    g = _m.alpha_gnn[i].item()
+                    if getattr(_m, "use_ff", False):
+                        f = _m.alpha_ff[i].item()
+                        pieces.append(f"L{i}(gnn={g:.2e},ff={f:.2e})")
+                    else:
+                        pieces.append(f"L{i}(gnn={g:.2e})")
                 print("  [alpha] " + " ".join(pieces))
         dataset.rebuild_indice(accelerator)
         loader = DataLoader(
@@ -389,6 +401,19 @@ if __name__ == "__main__":
                         help="If > 0, print SMPNN alpha values every N "
                              "epochs. Helpful diagnostic to confirm the "
                              "scaling is actually ramping up.")
+    # SMPNN ablation flags (Studies A, B, D in the ablation plan).
+    parser.add_argument("--use_attention", type=str2bool, default=False,
+                        help="SMPNN-B: enable parallel linear global attention "
+                             "(paper Appendix A).")
+    parser.add_argument("--num_heads", type=int, default=1,
+                        help="Number of attention heads when --use_attention.")
+    parser.add_argument("--use_alpha", type=str2bool, default=True,
+                        help="SMPNN-A2: enable learnable alpha scaling. "
+                             "False fixes alpha=1 on both sub-blocks.")
+    parser.add_argument("--use_ff", type=str2bool, default=True,
+                        help="SMPNN-A3: enable pointwise feedforward sub-block.")
+    parser.add_argument("--use_gnn_ln", type=str2bool, default=True,
+                        help="SMPNN-A4: enable Pre-LayerNorm before GNN.")
 
     args = parser.parse_args()
     args.eval_batchsize = args.batchsize if args.eval_batchsize is None else args.eval_batchsize
