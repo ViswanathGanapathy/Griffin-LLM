@@ -16,9 +16,14 @@
 # "with/without transformer at extended reach" ablation pair.
 #
 # Memory / cost:
-#   hop=3 + fanout=10 -> per-seed subgraph ~3x larger than hop=2 + fanout=20
-#   batchsize dropped 256 -> 128 to compensate
-#   ~6-8 hours per variant on a single A100
+#   hop=3 + fanout=10 -> per-seed subgraph ~2.6x larger than hop=2 + fanout=20.
+#   At hiddim=512, num_mp=6, batchsize=128 this OOMs an 80 GB A100 in the
+#   first forward (the SelfAttentionAggregator's (N, T, hiddim) intermediates
+#   are the dominant cost, not the SMPNN GNN itself).
+#   batchsize dropped 128 -> 64 to fit. Wall time roughly doubles.
+#   If batchsize=64 still OOMs, also drop fanout: 10 -> 8 (cuts node count
+#   per seed by ~half; only minor change to experiment design).
+#   ~12-16 hours per variant on a single A100 at batchsize=64.
 #
 # Usage:
 #   ./run_smpnn_hop3_native.sh 2>&1 | tee logs/smpnn-hop3.log
@@ -47,7 +52,7 @@ run_one() {
         --tasks others-1 \
         $FLAGS \
         --hiddim 512 --use_rev True --use_gate True \
-        --maxepoch 20 --batchsize 128 \
+        --maxepoch 20 --batchsize 64 \
         --lr 3e-4 --wd 4e-4 \
         --hop 3 --fanout 10 --fewshotfanout 3 \
         --eval_per_epoch 1 \
