@@ -98,7 +98,11 @@ TABPFN_FLAGS=(
     --tabpfn_version v3
     --tabpfn_fit_mode fit_with_cache
     --tabpfn_inference_precision autocast
-    --tabpfn_inference_config '{"MAX_NUMBER_OF_SAMPLES": 50000, "MAX_NUMBER_OF_FEATURES": 600}'
+    # JSON must be whitespace-free AND single-quoted: this array is expanded
+    # via ${TABPFN_FLAGS[*]} and re-split on whitespace inside eval_one.
+    # Whitespace inside the JSON shreds it across argv tokens; missing single
+    # quotes would let bash strip the inner double quotes from the array element.
+    --tabpfn_inference_config '{"MAX_NUMBER_OF_SAMPLES":50000,"MAX_NUMBER_OF_FEATURES":600}'
 )
 
 TABICL_FLAGS=(
