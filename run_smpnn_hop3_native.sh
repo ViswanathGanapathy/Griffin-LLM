@@ -15,15 +15,16 @@
 # The two SMPNN-6 hop=3 variants (with vs without attention) are the
 # "with/without transformer at extended reach" ablation pair.
 #
-# Memory / cost:
-#   hop=3 + fanout=10 -> per-seed subgraph ~2.6x larger than hop=2 + fanout=20.
-#   At hiddim=512, num_mp=6, batchsize=128 this OOMs an 80 GB A100 in the
-#   first forward (the SelfAttentionAggregator's (N, T, hiddim) intermediates
-#   are the dominant cost, not the SMPNN GNN itself).
-#   batchsize dropped 128 -> 64 to fit. Wall time roughly doubles.
-#   If batchsize=64 still OOMs, also drop fanout: 10 -> 8 (cuts node count
-#   per seed by ~half; only minor change to experiment design).
-#   ~12-16 hours per variant on a single A100 at batchsize=64.
+# Memory / cost (post-empirical, 80 GB A100):
+#   bs=128, fanout=10 -> OOM first forward (all SMPNN variants).
+#   bs=64,  fanout=8  -> vanilla-4 fits; SMPNN-6/8 OOM during backward
+#                         (epoch ~4) or first forward.
+#   bs=32,  fanout=6  -> fits SMPNN-6 and SMPNN-6+attn. SMPNN-8 may still
+#                         OOM (23M params). Current defaults below.
+#   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True (set globally below)
+#   reduces fragmentation, which was the proximate cause of the backward
+#   OOM at hop=3 over multiple epochs.
+#   Wall time ~3-4x hop=2 at these settings.
 #
 # Usage:
 #   ./run_smpnn_hop3_native.sh 2>&1 | tee logs/smpnn-hop3.log
@@ -34,6 +35,10 @@
 # (then later: CUDA_VISIBLE_DEVICES=0 RUN_ONLY=smpnn-8-hop3 ./run_smpnn_hop3_native.sh)
 
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+# expandable_segments reduces caching-allocator fragmentation. Without this
+# at hop=3, accumulated fragmentation over a few epochs pushes peak GPU
+# memory past 80 GB and OOMs on the backward pass.
+export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
 RUN_ONLY=${RUN_ONLY:-all}
 
 run_one() {
@@ -52,9 +57,9 @@ run_one() {
         --tasks others-1 \
         $FLAGS \
         --hiddim 512 --use_rev True --use_gate True \
-        --maxepoch 20 --batchsize 64 \
+        --maxepoch 20 --batchsize 32 \
         --lr 3e-4 --wd 4e-4 \
-        --hop 3 --fanout 10 --fewshotfanout 3 \
+        --hop 3 --fanout 6 --fewshotfanout 3 \
         --eval_per_epoch 1 \
         --savepath checkpoints/smpnn-hop3-${TAG}
 }
