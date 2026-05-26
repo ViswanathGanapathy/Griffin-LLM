@@ -24,9 +24,24 @@
 set -e
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 
+# RUN_ONLY = space-separated list of tags to run. Defaults to "all".
+# Example to resume after a partial run:
+#   RUN_ONLY="d2-alpha-1e-4 d3-alpha-1e-2 b1-attn-1h" ./run_smpnn_ablations.sh
+RUN_ONLY=${RUN_ONLY:-all}
+
 run_one() {
     local TAG=$1
     local FLAGS=$2
+    if [ "$RUN_ONLY" != "all" ]; then
+        local found=0
+        for t in $RUN_ONLY; do
+            if [ "$t" = "$TAG" ]; then found=1; break; fi
+        done
+        if [ "$found" = "0" ]; then
+            echo ">>> Skipping $TAG (not in RUN_ONLY='$RUN_ONLY')"
+            return
+        fi
+    fi
     echo ""
     echo "================================================"
     echo ">>> Training smpnn-ablation-${TAG}"
