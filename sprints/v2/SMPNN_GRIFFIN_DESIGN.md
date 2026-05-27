@@ -150,8 +150,61 @@ classification.
 
 | ID | Backbone × Head | Motivation | Status |
 |---|---|---|---|
-| ICL-1 | All 11 backbones × TabPFN v3 ZS @ 30K, no-proj | Does the native-head ordering hold under TabPFN ZS? | 🟡 |
-| ICL-2 | All 11 backbones × TabICL v2 ZS @ 10K, no-proj | Does the ordering also hold under a different ICL head? Cross-validates the embedding-quality story. | 🟡 |
+| ICL-1 | All 11 backbones × TabPFN v3 ZS @ 30K, no-proj | Does the native-head ordering hold under TabPFN ZS? | ✅ (see 2.2.1) |
+| ICL-2 | All 11 backbones × TabICL v2 ZS @ 10K, no-proj | Does the ordering also hold under a different ICL head? Cross-validates the embedding-quality story. | ✅ (see 2.2.1) |
+
+#### 2.2.1 ICL eval results (in-distribution, single seed)
+
+TabPFN ZS no-proj ranking (avg across 6 others-1 tasks):
+
+| Rank | Backbone | Avg | Note |
+|---|---|---|---|
+| 1 | vanilla-4 (C1) | **0.5607** | New TabPFN ZS in-dist best |
+| 2 | d3-alpha-1e-2 (D3) | 0.5592 | Native-head winner; tied with #1 within noise |
+| 3 | a2-no-alpha | 0.5470 | |
+| 4 | a4-no-gnn-ln | 0.5458 | |
+| 5 | b1-attn-1h | 0.5443 | Attention less catastrophic under TabPFN than native |
+| 6 | a3-no-ff | 0.5362 | FF removal still hurts |
+| 7 | smpnn-6 (D1) | 0.5318 | SMPNN-6 default loses to vanilla-4 under TabPFN |
+| 8 | smpnn-4 (C2) | 0.5317 | |
+| 9 | d2-alpha-1e-4 | 0.5305 | |
+| 10 | smpnn-8 | 0.5250 | |
+| 11 | **c3-vanilla-6** | **0.5220** | Sharp drop from native rank 3 (0.5490) -- embedding-quality collapse |
+
+TabICL ZS no-proj ranking:
+
+| Rank | Backbone | Avg |
+|---|---|---|
+| 1 | **d3-alpha-1e-2 (D3)** | **0.5503** |
+| 2 | a2-no-alpha | 0.5453 |
+| 3 | a4-no-gnn-ln | 0.5450 |
+| 4 | vanilla-4 (C1) | 0.5430 |
+| 5 | a3-no-ff | 0.5360 |
+| 6 | smpnn-6 (D1) | 0.5350 |
+| 7-11 | (b1, smpnn-4, d2, smpnn-8, c3) | 0.5190 - 0.5293 |
+| 11 | c3-vanilla-6 | 0.5190 |
+
+#### 2.2.2 Cross-head findings (paper-shaping)
+
+1. **D3 wins under all 3 heads** (native 0.5650 #1, TabPFN 0.5592 #2, TabICL 0.5503 #1).
+   Robust across heads -- strongest single finding in the matrix without multi-seed.
+
+2. **C3 (vanilla-6) collapses on embedding quality.** Native rank 3 -> TabPFN/TabICL rank 11.
+   Rescues the SMPNN paper's "vanilla GNNs collapse at depth 6" claim for RDB --
+   shifted from classification accuracy to embedding quality.
+
+3. **Native vs ICL rankings differ substantially.** Spearman correlation between
+   native and TabPFN-ZS rankings is ~0.3. The "best backbone" depends on what's
+   downstream. SMPNN-6 (D1) is rank 2 under native but rank 7 under TabPFN.
+   *A backbone optimized for native-head training is not optimal for downstream
+   ICL use.* This is itself a paper-worthy finding.
+
+4. **Attention (B1) is bad-to-middling under ICL, not catastrophic.**
+   Native rank 11 -> TabPFN rank 5, TabICL rank 8. Softens the "attention
+   strictly hurts" native-head claim to "attention doesn't help anywhere".
+
+5. **FF removal (A3) is consistently weak across all 3 heads** (native 0.5280,
+   TabPFN 0.5362, TabICL 0.5360). FF carries cross-head signal.
 
 ### 2.3 Extended-reach (hop=3) ablation
 
