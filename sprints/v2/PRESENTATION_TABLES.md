@@ -135,16 +135,16 @@ Tasks: amazon-churn, amazon-rating, outbrain-small-ctr, rel-avito-ad-ctr, rel-av
 
 ## 9. Cross-Task c2 → c1 (TARGET: commerce-1) — PARTIAL
 
-3 cells pending in the in-flight gap-filler eval.
+3 cells still pending in the in-flight gap-filler eval (D1 TabICL almost done, D3 both heads pending).
 
 Tasks: diginetica-downsample-ctr, rel-hm-item-sales, rel-hm-user-churn, retailrocket-cvr, seznam-charge (hr@1), seznam-prepay (hr@1).
 
 | Backbone | Head | diginetica | hm-item-sales | hm-user-churn | retailrocket | sez-charge | sez-prepay | **avg** |
 |---|---|---|---|---|---|---|---|---|
 | **C1 vanilla-4** | **tabpfn** | 0.529 | **−1.489** | **0.628** | 0.940 | **0.378** | **0.578** | **0.2605** |
-| D1 smpnn-6 | tabpfn | **0.554** | −1.528 | 0.621 | **0.964** | 0.316 | 0.552 | 0.2465 |
+| D1 smpnn-6 | tabpfn | **0.551** | −1.528 | 0.621 | **0.964** | 0.315 | 0.553 | 0.2459 |
 | **C1 vanilla-4** | **tabicl** | 0.533 | −1.745 | 0.623 | **0.956** | 0.322 | 0.457 | **0.1911** |
-| D1 smpnn-6 | tabicl | 0.539 | pending | pending | pending | pending | pending | pending |
+| D1 smpnn-6 | tabicl | 0.540 | −1.711 | (pending) | (pending) | (pending) | (pending) | pending |
 | D3 α=1e-2 | tabpfn | pending | pending | pending | pending | pending | pending | pending |
 | D3 α=1e-2 | tabicl | pending | pending | pending | pending | pending | pending | pending |
 
