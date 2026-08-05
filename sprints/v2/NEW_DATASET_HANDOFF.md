@@ -431,21 +431,47 @@ task types. See [tabular_heads.py:446-546](../../tabular_heads.py#L446-L546):
   `tabicl-classifier-v2-20260212.ckpt` (the latest classifier weights).
   Aliases: `default` (library-picked), `v1`, `v1.1`, `v2`.
 - **Regression tasks** — the flag is **silently ignored**. Griffin's
-  wrapper deliberately returns empty kwargs so `tabicl` picks its own
-  default regressor weights. This is because all the aliases in
-  `_CHECKPOINT_VERSION_MAP` are *classifier* checkpoints; forcing a
-  classifier .ckpt into `TabICLRegressor` loads fine but then trips
-  `predict_stats`'s `max_classes == 0` assertion downstream.
+  wrapper deliberately returns empty kwargs so `tabicl` falls back to
+  `TabICLRegressor`'s built-in default:
 
-**To pin a specific regressor checkpoint**, use `--tabicl_model_path`
-(the model_path override bypasses all task-type routing):
+  **`tabicl-regressor-v2-20260212.ckpt`**
+
+  Confirmed at `tabicl/sklearn/regressor.py:246` in the installed package
+  (tabicl v2.0.3):
+  ```python
+  checkpoint_version: str = "tabicl-regressor-v2-20260212.ckpt",
+  ```
+  Same release date as the classifier v2 — both files ship together as
+  the tabicl-v2 release. The regressor is *not* in Griffin's
+  `_CHECKPOINT_VERSION_MAP`; forcing a classifier .ckpt into
+  `TabICLRegressor` loads fine but then trips `predict_stats`'s
+  `max_classes == 0` assertion downstream, which is why the wrapper
+  routes around the map for regression.
+
+**Where the checkpoint comes from.** Both files live in the HuggingFace
+Hub repo `jingang/TabICL`. On the first `.fit()` call, tabicl invokes
+`hf_hub_download(repo_id="jingang/TabICL", filename="tabicl-regressor-v2-20260212.ckpt")`
+and caches it in the standard HF cache (`~/.cache/huggingface/hub/`).
+Subsequent runs use the cache. Set `HF_HOME=/some/path` to relocate the
+cache. First download is a few hundred MB.
+
+**To pin a specific regressor checkpoint** (e.g. for reproducibility
+across environments, or to point at a bundled file), use
+`--tabicl_model_path` — the model_path override bypasses all task-type
+routing:
 
 ```bash
---tabicl_model_path /absolute/path/to/tabicl-regressor-<version>.ckpt
+--tabicl_model_path ~/.cache/huggingface/hub/models--jingang--TabICL/snapshots/*/tabicl-regressor-v2-20260212.ckpt
 ```
 
-The regressor checkpoints ship inside the `tabicl` PyPI package — inspect
-`site-packages/tabicl/checkpoints/` to see what's bundled.
+Or pre-download and point at a stable absolute path.
+
+**Companion classifier** — matched pair as of the v2 release:
+
+| Task type | Default checkpoint | How selected |
+|---|---|---|
+| Classification | `tabicl-classifier-v2-20260212.ckpt` | Via `--tabicl_checkpoint_version v2` (Griffin's `_CHECKPOINT_VERSION_MAP["v2"]`) |
+| Regression | `tabicl-regressor-v2-20260212.ckpt` | Auto-selected by tabicl; NOT in Griffin's map |
 
 ### 8.2 — Zero-shot eval (classification and regression)
 
