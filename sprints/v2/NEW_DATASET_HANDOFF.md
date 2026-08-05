@@ -404,8 +404,53 @@ If you want to fine-tune TabPFN on your data instead of pure in-context:
 
 ## 8. Evaluation with TabICL as the ICL head
 
-Same script, different head. TabICL is faster and lighter-weight but
-supports smaller context (10K vs TabPFN's 30K).
+Same script, different head. TabICL is faster and lighter-weight than
+TabPFN but caps at ~10K context (theoretical max 48K per
+[tabular_heads.py:53](../../tabular_heads.py#L53)).
+
+### 8.0 — Task type is auto-selected per task
+
+You never pass `--task_type` at the CLI. `TabICLHead` reads each task's
+`task_type` from `metatask.yaml` and picks the correct underlying model
+([tabular_heads.py:561-564](../../tabular_heads.py#L561-L564)):
+
+| `task_type` in metatask.yaml | Backend model class |
+|---|---|
+| `retrieval` (any # classes, including 2 = binary) | `TabICLClassifier` |
+| `regression` | `TabICLRegressor` |
+
+**One eval run can mix both types** — regression tasks are routed to the
+regressor, classification tasks to the classifier, per task. Recommended.
+
+### 8.1 — CRITICAL — Checkpoint selection is asymmetric
+
+The `--tabicl_checkpoint_version` flag behaves differently for the two
+task types. See [tabular_heads.py:446-546](../../tabular_heads.py#L446-L546):
+
+- **Classification tasks** — `--tabicl_checkpoint_version v2` selects
+  `tabicl-classifier-v2-20260212.ckpt` (the latest classifier weights).
+  Aliases: `default` (library-picked), `v1`, `v1.1`, `v2`.
+- **Regression tasks** — the flag is **silently ignored**. Griffin's
+  wrapper deliberately returns empty kwargs so `tabicl` picks its own
+  default regressor weights. This is because all the aliases in
+  `_CHECKPOINT_VERSION_MAP` are *classifier* checkpoints; forcing a
+  classifier .ckpt into `TabICLRegressor` loads fine but then trips
+  `predict_stats`'s `max_classes == 0` assertion downstream.
+
+**To pin a specific regressor checkpoint**, use `--tabicl_model_path`
+(the model_path override bypasses all task-type routing):
+
+```bash
+--tabicl_model_path /absolute/path/to/tabicl-regressor-<version>.ckpt
+```
+
+The regressor checkpoints ship inside the `tabicl` PyPI package — inspect
+`site-packages/tabicl/checkpoints/` to see what's bundled.
+
+### 8.2 — Zero-shot eval (classification and regression)
+
+The same command works for both — regression tasks silently ignore the
+version flag and fall through to the library's regressor default:
 
 ```bash
 python hmaintask_combine_llm.py \
@@ -429,12 +474,70 @@ python hmaintask_combine_llm.py \
     2>&1 | tee logs/griffin-smpnn-eval-tabicl.log
 ```
 
-**TabICL-specific flags** (see
-[hmaintask_combine_llm.py:2751-2805](../../hmaintask_combine_llm.py#L2751-L2805)):
-- `--tabicl_checkpoint_version v2` — latest weights (v1 also available)
-- `--tabicl_model_path <path.ckpt>` — override with a local checkpoint
-- `--tabicl_finetune` (optional) — fine-tune with epoch/lr/patience flags
-- `--tabicl_finetune_freeze_col / freeze_row / freeze_icl` — parameter-efficient FT
+Flag reference:
+- `--head tabicl` — pick TabICL
+- `--tabicl_checkpoint_version v2` — latest classifier weights
+  (`tabicl-classifier-v2-20260212.ckpt`); ignored for regression
+- `--tabicl_model_path <path>` — local .ckpt override (works for both
+  types; the only way to pin a specific regressor checkpoint)
+- `--icl_max_context 10000` — TabICL default; theoretical ceiling is
+  48K but 10K fits comfortably in 80GB
+- `--icl_n_estimators 8` — inference ensemble size
+- `--no_icl_projection --probe_epochs 0` — feed raw 512-d Griffin
+  embeddings, skip the learned projection
+
+### 8.3 — Which flags matter per task type
+
+| Flag | Classification | Regression |
+|---|---|---|
+| `--head tabicl` | required | required |
+| `--tabicl_checkpoint_version v2` | **required** (latest classifier) | ignored — omit or leave at default |
+| `--tabicl_model_path <path>` | optional override | **only way** to pin a specific regressor .ckpt |
+| `--icl_max_context 10000` | recommended | recommended |
+| `--icl_n_estimators 8` | ensemble size | ensemble size |
+| `--no_icl_projection --probe_epochs 0` | recommended | recommended |
+
+### 8.4 — TabICL fine-tuning (optional, both types)
+
+Requires the finetune extra: `pip install 'tabicl[finetune]'`.
+
+```bash
+--tabicl_finetune \
+--tabicl_finetune_epochs 50 \
+--tabicl_finetune_lr 1e-5 \
+--tabicl_finetune_patience 10 \
+--tabicl_finetune_n_estimators_train 2 \
+--tabicl_finetune_n_estimators_validation 2 \
+--tabicl_finetune_freeze_col                 # standard PEFT — biggest memory win
+```
+
+**Early-stopping metric — differs by task type**
+(`--tabicl_finetune_eval_metric`, see [hmaintask_combine_llm.py:2776-2780](../../hmaintask_combine_llm.py#L2776-L2780)):
+
+| Task type | Accepted values | Default |
+|---|---|---|
+| Classification | `roc_auc` \| `log_loss` \| `accuracy` | `roc_auc` |
+| Regression | `mae` \| `mse` \| `r2` (NOT `rmse` — rejected by tabicl's FT regressor) | `mae` |
+
+If you don't pass `--tabicl_finetune_eval_metric`, Griffin's
+`_default_eval_metric()` picks the right one automatically per task type.
+
+**Parameter-efficient FT knobs** (memory savers, both types):
+
+- `--tabicl_finetune_freeze_col` — freeze the 12-layer column embedder.
+  Biggest memory win; standard PEFT recipe. **Recommended.**
+- `--tabicl_finetune_freeze_row` — freeze the row interaction transformer.
+- `--tabicl_finetune_freeze_icl` — freeze the ICL learning transformer.
+
+Freezing all three defeats the purpose; freeze `col` alone as the
+default.
+
+### 8.5 — Multi-GPU note
+
+Single-process multi-GPU is NOT supported by tabicl's FT loop
+(`mem_get_info` rejects bare `"cuda"`). To use multiple GPUs, split your
+eval tasks across two parallel jobs with different `CUDA_VISIBLE_DEVICES`
+values. The deprecated `--tabicl_multi_gpu` flag is a no-op.
 
 ---
 
