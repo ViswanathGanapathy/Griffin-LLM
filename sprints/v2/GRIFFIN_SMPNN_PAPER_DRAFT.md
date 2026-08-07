@@ -1,38 +1,62 @@
-# Domain-Specific Trade-offs of Scalable Message Passing in Relational Foundation Models
+# Depth, Domain, and Reproducibility: A Multi-Seed Study of SMPNN in Relational Foundation Models
 
-*Draft — grounded in n=5 multi-seed results from [SMPNN_MASTER_RESULTS.md](SMPNN_MASTER_RESULTS.md)*
+*Extended abstract — targeted at Learning on Graphs (LoG) conference, 4-page track.
+Grounded in n=5 multi-seed results from [SMPNN_MASTER_RESULTS.md](SMPNN_MASTER_RESULTS.md).*
 
 ---
 
 ## Abstract
 
-Griffin is a relational message-passing neural network (RMPNN) for tabular
-foundation modeling over multi-table databases. In this work we integrate
-the Scalable Message Passing Neural Network (SMPNN) architecture — a
-Transformer-style two-sub-block layer with post-aggregation gating,
-per-sub-block LayerNorm, and DiT-style near-identity initialization —
-into Griffin's backbone. Under a rigorous 5-seed evaluation on 24
-RelBench tasks across 4 task families with TabPFN v3 and TabICL v2
-in-context heads, we find that SMPNN's benefit is **domain-specific**
-rather than universal: on the "others" domain (sports, social, biology,
-travel, clinical) SMPNN reduces training variance by up to **7×** at
-equal or better mean performance; on the "commerce" domain (e-commerce,
-marketplace) SMPNN and additional depth both **hurt** transfer. A single-
-seed pilot suggesting a decisive +0.050 SMPNN win on commerce transfer
-was completely reversed under 5-seed replication. Our primary
-contribution is not a new state-of-the-art number but a demonstration
-that architectural choices in relational GNNs must be treated as
-domain-level hyperparameters, and that reporting single-seed pilot
-results in this setting is systematically unreliable.
+Relational tabular foundation models such as Griffin encode multi-table
+databases as heterogeneous graphs and apply message passing to learn
+transferable representations. A natural question is whether depth-scaling
+tricks that enable 100-layer Transformers — per-sub-block LayerNorm,
+sequential residual updates, and DiT-style near-identity initialization
+via a learnable α scalar — port to relational GNNs. We integrate the
+Scalable Message Passing Neural Network (SMPNN) recipe into Griffin and
+evaluate it rigorously with **5 seeds** on 24 RelBench tasks across
+4 task families, using TabPFN v3 and TabICL v2 as in-context prediction
+heads. Three findings emerge. **(i) Domain specificity.** SMPNN helps
+others-domain transfer (sports, social, biology, travel, clinical) but
+consistently *hurts* commerce-domain transfer (Δ = −0.022 on c2→c1,
+same-sign across all 5 seeds). **(ii) Variance reduction as the primary
+win.** On the tasks it helps, SMPNN-6 α=1e-2 improves mean AUROC by
+only +0.003 over the strongest vanilla baseline but reduces
+seed-variance by up to **7×** (±0.0102 → ±0.0015 on airbnb-destination
+o1→o2 TabPFN). **(iii) Non-monotone depth.** Both architectures peak at
+L=6, with SMPNN raising the effective depth ceiling from L=4 to L=6
+but degrading at L=8 alongside vanilla. Beyond these architectural
+findings, a decisive single-seed pilot (+0.050 SMPNN win on
+commerce-1→commerce-2) was fully **reversed** under 5-seed replication
+to a −0.030 loss, providing direct evidence that single-seed reporting
+for cross-task GNN transfer is systematically unreliable. We conclude
+that architectural choices in relational GNNs should be treated as
+**domain-level hyperparameters** and that n ≥ 5 seed reporting should
+be the minimum bar for architectural claims in this class of model.
 
-**Key contributions:**
-1. First integration of SMPNN into a relational tabular foundation model
-2. First rigorous 5-seed evaluation of Griffin variants across
-   in-distribution and cross-task transfer
-3. Empirical demonstration that SMPNN's benefit is domain-specific and
-   that its primary win is variance reduction, not mean improvement
-4. Depth-sweep evidence that both Griffin and SMPNN-Griffin follow
-   non-monotone depth curves with a peak at L=6
+**Keywords:** relational GNNs, tabular foundation models, message
+passing, reproducibility, cross-task transfer.
+
+---
+
+## Contributions
+
+1. **First integration** of the SMPNN depth-scaling recipe into a
+   relational tabular foundation model (Griffin), with a small
+   parameter overhead (<0.03% of the base model).
+2. **First multi-seed (n=5)** evaluation of Griffin variants across
+   6 cross-task transfer directions and 2 modern in-context heads
+   (TabPFN v3, TabICL v2).
+3. **Empirical demonstration** that SMPNN's benefit is domain-specific
+   and that its primary win is **variance reduction**, not mean
+   improvement — a distinction previously obscured by single-seed
+   reporting.
+4. **Depth-sweep evidence** that both Griffin and SMPNN-Griffin follow
+   non-monotone depth curves with a peak at L=6; the DiT-style
+   near-identity init raises the depth ceiling by only two layers.
+5. **A concrete reproducibility case study**: a +0.050 single-seed win
+   fully reversed to −0.030 under 5-seed replication, motivating an
+   n ≥ 5 minimum for architectural claims on relational transfer.
 
 ---
 
