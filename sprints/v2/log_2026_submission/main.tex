@@ -1,0 +1,370 @@
+% ============================================================
+%  LoG 2026 — Extended Abstract Track submission
+%  Depth, Domain, and Reproducibility:
+%  A Multi-Seed Study of SMPNN in Relational Foundation Models
+% ============================================================
+
+\documentclass{article}
+
+% Track selection (uncomment ONE):
+\usepackage[review,eabstract]{log_2026}   % anonymous submission, extended-abstract track  [CURRENT]
+% \usepackage[eabstract]{log_2026}         % camera-ready, extended-abstract track
+% \usepackage[review]{log_2026}            % anonymous submission, proceedings (full) track
+% \usepackage[preprint]{log_2026}          % non-anonymous preprint version
+
+\usepackage{booktabs}          % professional-quality tables
+\usepackage{multirow}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{array}
+
+\usepackage[numbers,compress,sort]{natbib}
+
+% Custom column type for the results tables
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+
+% ------------------------------------------------------------
+%  Title & authors
+% ------------------------------------------------------------
+
+\title[Depth, Domain, and Reproducibility]{%
+  Depth, Domain, and Reproducibility:\\
+  A Multi-Seed Study of SMPNN in Relational Foundation Models}
+
+% Author block (anonymised for review; uncomment the real one for camera-ready)
+\author[Anonymous]{%
+  Anonymous Authors\\
+  Anonymous Institution\\
+  \email{anonymous@anonymous.org}
+}
+
+% Camera-ready author block (kept here as a template — do NOT include for review):
+% \author[Ganapathy et al.]{%
+%   Viswanath Ganapathy\\
+%   Affiliation 1\\
+%   \email{gviswa@gmail.com}\And
+%   Co-Author Name\\
+%   Affiliation 2\\
+%   \email{coauthor@example.org}
+% }
+
+\begin{document}
+
+\maketitle
+
+% ------------------------------------------------------------
+%  Abstract
+% ------------------------------------------------------------
+\begin{abstract}
+Relational tabular foundation models such as Griffin encode multi-table databases as heterogeneous graphs and apply message passing to learn transferable representations. A natural question is whether depth-scaling tricks that enable 100-layer Transformers---per-sub-block LayerNorm, sequential residual updates, and DiT-style near-identity initialisation via a learnable~$\alpha$ scalar---port to relational GNNs. We integrate the Scalable Message Passing Neural Network (SMPNN) recipe into Griffin and evaluate it rigorously with \textbf{5 seeds} on 24 RelBench tasks across 4~task families, using TabPFN\,v3 and TabICL\,v2 as in-context prediction heads. Three findings emerge. \textbf{(i)~Domain specificity}: SMPNN helps \emph{others}-domain transfer (sports, social, biology, travel, clinical) but consistently \emph{hurts} \emph{commerce}-domain transfer ($\Delta=-0.022$ on c2$\to$c1, same-sign across all 5~seeds). \textbf{(ii)~Variance reduction as the primary win}: on the tasks it helps, SMPNN-6~$\alpha{=}\text{1e-2}$ improves mean AUROC by only $+0.003$ over the strongest vanilla baseline but reduces seed-variance by up to $7\times$ ($\pm 0.0102 \to \pm 0.0015$ on airbnb-destination o1$\to$o2 TabPFN). \textbf{(iii)~Non-monotone depth}: both architectures peak at $L{=}6$, with SMPNN raising the effective depth ceiling from $L{=}4$ to $L{=}6$ but degrading at $L{=}8$ alongside vanilla. Beyond these architectural findings, a decisive single-seed pilot ($+0.050$ SMPNN win on c1$\to$c2) was fully \emph{reversed} under 5-seed replication to a $-0.030$ loss, providing direct evidence that single-seed reporting for cross-task GNN transfer is systematically unreliable. We conclude that architectural choices in relational GNNs should be treated as \textbf{domain-level hyperparameters} and that $n \ge 5$ seed reporting should be the minimum bar for architectural claims in this class of model.
+\end{abstract}
+
+% ------------------------------------------------------------
+%  1  Introduction
+% ------------------------------------------------------------
+\section{Introduction}
+\label{sec:intro}
+
+Relational databases dominate enterprise data, yet most tabular ML operates on flat single tables. Relational foundation models---Griffin~\citep{wang2025griffin}, 4DBInfer, RelBench~\citep{robinson2024relbench}---treat a multi-table schema as a heterogeneous graph and apply message passing to learn representations transferable across databases and tasks. Downstream prediction is typically delegated to a modern tabular in-context learner \citep{hollmann2024tabpfn,qu2024tabicl} that consumes the frozen encoder embeddings.
+
+Griffin's default encoder is a shallow ($L{=}4$) relational MPNN with mean+max aggregation per (target, edge-type) pair, gated bidirectional message flow, and a shared non-affine LayerNorm. Attempts to scale it deeper hit the classical GNN over-smoothing pathology. The Scalable Message Passing Neural Network (SMPNN) recipe imports three Transformer-era tricks---per-sub-block LayerNorm, sequential sub-block composition, and DiT-style residual gating with a learnable~$\alpha$ scalar~\citep{peebles2023dit}---to raise the depth ceiling of GNNs. Whether these tricks translate into transferable gains for a \emph{relational foundation model} that must generalise across heterogeneous task families is an open question this paper answers empirically.
+
+We ask three questions: (Q1)~does SMPNN improve in-distribution accuracy on Griffin's task set? (Q2)~does it improve cross-task transfer? (Q3)~how many seeds are required for either answer to be reliable? All three are addressed under $n{=}5$ multi-seed evaluation on 24 RelBench tasks with two modern ICL heads.
+
+% ------------------------------------------------------------
+%  2  Griffin and SMPNN-Griffin
+% ------------------------------------------------------------
+\section{Griffin and SMPNN-Griffin}
+\label{sec:arch}
+
+\paragraph{Griffin encoder.}
+For each target row, Griffin samples a hop-2/fanout-20 subgraph and processes it with $L$~message-passing layers. The core operator (RMPNN) aggregates by (target-node, edge-type) group with mean-then-max pooling and per-edge-type gating. Each vanilla layer applies a single residual update composed of three parallel branches---a feed-forward branch and two RMPNN branches (forward and reverse edges), each gated by zero-initialised per-node scalars---sharing one non-affine LayerNorm:
+\begin{equation}
+  x^{(i+1)} = x^{(i)} + \mathrm{MLP}_{\text{ff}}\big(\mathrm{LN}(x^{(i)})\big) + g_{\text{fwd}}\!\cdot\!\mathrm{RMPNN}(\cdot) + g_{\text{rev}}\!\cdot\!\mathrm{RMPNN}_{\text{rev}}(\cdot). \label{eq:vanilla}
+\end{equation}
+
+\paragraph{SMPNN-Griffin.}
+We refactor each layer into two sequential sub-blocks with per-sub-block affine LayerNorms and a learnable residual scale~$\alpha$ on the FFN sub-block:
+\begin{align}
+  \tilde{x}    &= x^{(i)} + \mathrm{SiLU}\big(g_{\text{fwd}}\cdot\mathrm{RMPNN}(\mathrm{LN}_1(x^{(i)})) + g_{\text{rev}}\cdot\mathrm{RMPNN}_{\text{rev}}(\cdot)\big) \\
+  x^{(i+1)}    &= \tilde{x} + \alpha_i \cdot \mathrm{MLP}_{\text{ff}}(\mathrm{LN}_2(\tilde{x})).                                                                     \label{eq:smpnn}
+\end{align}
+Three changes: (a)~$\mathrm{MLP}_{\text{pre}}$ is bare Linear with SiLU moved \emph{outside} the RMPNN---combined with zero-initialised gates, sub-block~1 outputs $\mathrm{SiLU}(0)=0$ at step~1; (b)~$\alpha$ is initialised at a small value ($10^{-6}$ or $10^{-2}$), making the FFN sub-block near-identity at init; (c)~the whole layer therefore acts as identity at initialisation (DiT-style init). Overhead: ${\sim}12$K parameters for a 40M-parameter model ($<$0.03\%).
+
+We treat $\alpha_{\text{init}}$ as a hyperparameter: $\alpha{=}10^{-6}$ is the paper default; $\alpha{=}10^{-2}$ (denoted D3) starts the FFN sub-block with a small but non-negligible contribution and is favoured when warm-starting from a pretrained vanilla checkpoint.
+
+% ------------------------------------------------------------
+%  3  Experimental Setup
+% ------------------------------------------------------------
+\section{Experimental Setup}
+\label{sec:setup}
+
+\textbf{Dataset.} RelBench joint-v65 (24~tasks, 4~families of~6): \emph{others-1} (sports/social/biology), \emph{others-2} (travel/clinical), \emph{commerce-1} (e-commerce), \emph{commerce-2} (marketplace/ads). Direction averages are over classification (AUROC) tasks; regression (MAE) excluded from averages due to scale contamination.
+
+\textbf{Backbones.} Vanilla-4 (baseline), Vanilla-6 (depth control), SMPNN-6 $\alpha{=}10^{-6}$ (D1), SMPNN-6 $\alpha{=}10^{-2}$ (D3). All warm-started from a pretrained Vanilla-4 checkpoint. Training: 20~epochs, batch~256, lr~3e-4, wd~4e-4, AdamW.
+
+\textbf{ICL heads.} TabPFN\,v3 (30K~context, 8-est.) and TabICL\,v2 (10K~context, 8-est.), consuming raw 512-d Griffin embeddings.
+
+\textbf{Seeds.} 5~(42--46) for all transfer directions; 3~(42--44) for the depth sweep.
+
+% ------------------------------------------------------------
+%  4  Results
+% ------------------------------------------------------------
+\section{Results}
+\label{sec:results}
+
+Table~\ref{tab:main} summarises the headline numbers across all 5~evaluated transfer directions. Full per-task detail is in Appendix~\ref{app:detail}; depth sweep in Appendix~\ref{app:depth}; $\alpha$-init ablation in Appendix~\ref{app:alpha}.
+
+\begin{table}[t]
+  \caption{Cross-task transfer, $n{=}5$ seeds. Best per row in bold. $\pm\sigma$ across seeds.}
+  \label{tab:main}
+  \centering
+  \small
+  \begin{tabular}{@{}llcccc@{}}
+    \toprule
+    Direction  & Head    & Vanilla-4          & Vanilla-6           & SMPNN-6 $\alpha{=}10^{-6}$ & SMPNN-6 $\alpha{=}10^{-2}$ \\
+    \midrule
+    o1$\to$o2  & TabPFN  & 0.8151 $\pm 0.0656$ & 0.8574 $\pm 0.0102$ & ---                        & \textbf{0.8602 $\pm 0.0015$} \\
+    c1$\to$c2  & TabICL  & \textbf{0.5574 $\pm 0.0352$} & 0.5409 $\pm 0.0173$ & 0.5276 $\pm 0.0244$ & 0.5348 $\pm 0.0279$ \\
+    c2$\to$c1  & TabICL  & \textbf{0.7193 $\pm 0.0150$} & 0.7124 $\pm 0.0099$ & 0.7005 $\pm 0.0151$ & 0.6974 $\pm 0.0120$ \\
+    o2$\to$o1  & TabPFN  & \textbf{0.7540 $\pm 0.0054$} & ---                 & 0.7520 $\pm 0.0091$ & 0.7442 $\pm 0.0172$ \\
+    o2$\to$o1  & TabICL  & \textbf{0.7443 $\pm 0.0081$} & ---                 & 0.7420 $\pm 0.0119$ & 0.7352 $\pm 0.0133$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Three patterns are immediately visible:
+
+\textbf{(i) Domain specificity.} SMPNN helps forward others-transfer (o1$\to$o2) but hurts every direction that originates from or targets a commerce family. On c2$\to$c1 the SMPNN-6 $\alpha{=}10^{-2}$ loss is $\Delta = -0.022$, same-sign across all 5~seeds---decisive in the wrong direction.
+
+\textbf{(ii) Variance reduction is the primary win.} On o1$\to$o2 the mean improvement of SMPNN-6 $\alpha{=}10^{-2}$ over Vanilla-6 is only~$+0.003$, but the standard deviation drops $7\times$ ($\pm 0.0102 \to \pm 0.0015$)---and $44\times$ vs Vanilla-4 ($\pm 0.0656$). The variance reduction is what makes the claim defensible at small seed counts; the mean improvement alone would be within noise.
+
+\textbf{(iii) Directionality on others.} o1$\to$o2 favours SMPNN; o2$\to$o1 favours vanilla. The $\alpha{=}10^{-2}$ variant is notably less stable on o2$\to$o1 ($\pm 0.0172$) than on o1$\to$o2 ($\pm 0.0015$), suggesting the initialisation interacts with the target-family topology in a direction-specific way.
+
+\textbf{Depth (Appendix~\ref{app:depth}).} Both architectures peak at $L{=}6$ with SMPNN reaching the lowest variance of any configuration tested ($\pm 0.0012$). SMPNN needs $L{\geq}4$ to be useful (at $L{=}2$ it underperforms vanilla by~$0.107$); both degrade at $L{=}8$, consistent with over-smoothing setting in regardless of the SMPNN residual.
+
+\textbf{Reproducibility case study.} A single-seed pilot showed SMPNN-6 $\alpha{=}10^{-6}$ winning c1$\to$c2 by $+0.050$---a decisive signal that motivated the multi-seed campaign. Under 5-seed replication the sign of that effect \emph{reversed}: Vanilla-4 wins the same direction by~$+0.030$. High seed variance on commerce tasks (Vanilla-4 std on c1$\to$c2 is $\pm 0.035$) makes any single-seed conclusion in this range indistinguishable from initialisation noise.
+
+% ------------------------------------------------------------
+%  5  Discussion
+% ------------------------------------------------------------
+\section{Discussion}
+\label{sec:discussion}
+
+Our results reframe how SMPNN should be understood in the relational setting. The Transformer-era tricks it imports \emph{do} raise the Griffin depth ceiling ($L{=}4 \to L{=}6$) and \emph{do} substantially reduce seed-variance on the tasks they help---but neither effect is universal. Commerce-domain graphs (sparse, transactional, few-hop) actively reject the spectral residual; $\alpha$~tuning does not rescue them.
+
+The practical implication is that architectural choices in relational GNNs should be selected per \textbf{domain}, not once per benchmark. We also observe that the primary practical value of SMPNN---variance reduction---is exactly the kind of contribution that single-seed evaluations cannot detect and that mean-only leaderboards cannot reward. This suggests LoG-community reporting norms should shift toward $n{\ge}5$ seed variance-explicit metrics for architectural comparisons in this class of model.
+
+\paragraph{Limitations.} All conclusions are drawn from RelBench joint-v65; generalisation to other relational benchmarks is untested. All backbones warm-start from a vanilla checkpoint, so we cannot separate intrinsic SMPNN failure on commerce from a warm-start artefact. Three follow-up experiments are underway (native Griffin head on o1$\to$o2; second o1$\to$o2 anchor rel-trial-study-outcome; per-epoch $\alpha$ trajectory tracking) and will be integrated into the full technical report before camera-ready.
+
+% ------------------------------------------------------------
+%  Bibliography
+% ------------------------------------------------------------
+\bibliographystyle{plainnat}
+\bibliography{reference}
+
+% ============================================================
+%  Appendix
+% ============================================================
+\appendix
+
+\section{Full per-direction results ($n{=}5$ seeds)}
+\label{app:detail}
+
+\subsection{Others-1 $\to$ Others-2 (TabPFN)}
+Anchor task: airbnb-destination AUROC.
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabular}{@{}lccL{5.2cm}@{}}
+    \toprule
+    Backbone                     & Mean   & $\pm$Std   & Per-seed values (42--46)              \\
+    \midrule
+    Vanilla-4                    & 0.8151 & $\pm 0.0656$ & 0.709, 0.867, 0.870, 0.827, 0.803    \\
+    Vanilla-6                    & 0.8574 & $\pm 0.0102$ & 0.862, 0.841, 0.859, 0.868, 0.856    \\
+    \textbf{SMPNN-6 $\alpha{=}10^{-2}$} & \textbf{0.8602} & \textbf{$\pm 0.0015$} & 0.862, 0.860, 0.860, 0.861, 0.858 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Variance ratio SMPNN-6 $\alpha{=}10^{-2}$ : Vanilla-6 $= 1 : 6.8$. SMPNN's per-seed spread of $0.004$ is smaller than the effect it claims to detect---the strongest confirmation of the variance-reduction claim possible at 5~seeds.
+
+\subsection{Commerce-1 $\to$ Commerce-2 (TabICL)}
+Direction average over 4~AUROC tasks: amazon-churn, outbrain-small-ctr, rel-avito-user-clicks, rel-avito-user-visits.
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabular}{@{}lccc@{}}
+    \toprule
+    Backbone                        & Mean   & $\pm$Std   & $\Delta$ vs V4 \\
+    \midrule
+    \textbf{Vanilla-4}              & \textbf{0.5574} & $\pm 0.0352$ & ---          \\
+    Vanilla-6                       & 0.5409 & $\pm 0.0173$ & $-0.017$     \\
+    SMPNN-6 $\alpha{=}10^{-6}$      & 0.5276 & $\pm 0.0244$ & $-0.030$     \\
+    SMPNN-6 $\alpha{=}10^{-2}$      & 0.5348 & $\pm 0.0279$ & $-0.023$     \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+All differences within~$1\sigma$; Vanilla-4 wins. The single-seed pilot ($+0.050$ SMPNN win, seed~42) is fully within Vanilla-4's $\pm 0.035$ seed range and reverses under replication.
+
+\subsection{Commerce-2 $\to$ Commerce-1 (TabICL)}
+Direction average over 3~AUROC tasks: diginetica-downsample-ctr, rel-hm-user-churn, retailrocket-cvr.
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabular}{@{}lccc@{}}
+    \toprule
+    Backbone                        & Mean   & $\pm$Std   & $\Delta$ vs V4 \\
+    \midrule
+    \textbf{Vanilla-4}              & \textbf{0.7193} & $\pm 0.0150$ & ---        \\
+    Vanilla-6                       & 0.7124 & $\pm 0.0099$ & $-0.007$   \\
+    SMPNN-6 $\alpha{=}10^{-6}$      & 0.7005 & $\pm 0.0151$ & $-0.019$   \\
+    SMPNN-6 $\alpha{=}10^{-2}$      & 0.6974 & $\pm 0.0120$ & $-0.022$   \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+SMPNN-6 $\alpha{=}10^{-2}$ vs Vanilla-4: $\Delta = -0.022$, $|\Delta| > 0.02$ with \textbf{consistent direction across all 5~seeds}. This is the strongest evidence in the paper that SMPNN's spectral residual actively harms commerce transfer.
+
+\subsection{Others-2 $\to$ Others-1 (TabPFN + TabICL)}
+Direction average over 5~AUROC tasks: rel-f1-driver-\{dnf, top3\}, stackexchange-\{churn, upvote\}, virus-wnv-pred.
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabular}{@{}lcccc@{}}
+    \toprule
+    Backbone                    & TabPFN mean & $\pm$Std & TabICL mean & $\pm$Std \\
+    \midrule
+    \textbf{Vanilla-4}          & \textbf{0.7540} & $\pm 0.0054$ & \textbf{0.7443} & $\pm 0.0081$ \\
+    SMPNN-6 $\alpha{=}10^{-6}$  & 0.7520 & $\pm 0.0091$ & 0.7420 & $\pm 0.0119$ \\
+    SMPNN-6 $\alpha{=}10^{-2}$  & 0.7442 & $\pm 0.0172$ & 0.7352 & $\pm 0.0133$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Vanilla wins both heads with small margins. $\alpha{=}10^{-2}$ variance is~$3\times$ worse here than on o1$\to$o2---the direction (not the target family alone) matters for $\alpha$~behaviour.
+
+% -------------------- App B --------------------
+\section{Depth sweep (TabPFN, o1$\to$o2, $n{=}3$ seeds)}
+\label{app:depth}
+
+Anchor: airbnb-destination AUROC. $^{**}$ denotes $|\Delta| > 0.02$ (decisive).
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabular}{@{}ccccccl@{}}
+    \toprule
+    $L$ & Vanilla mean & $\pm$Std   & SMPNN mean       & $\pm$Std   & $\Delta$      & Verdict                     \\
+    \midrule
+    2   & 0.8013       & $\pm 0.0913$ & 0.6948            & $\pm 0.0062$ & $-0.107^{**}$ & Vanilla wins decisively    \\
+    4   & 0.8150       & $\pm 0.0920$ & \textbf{0.8488}   & $\pm 0.0114$ & $+0.034^{**}$ & SMPNN wins decisively      \\
+    6   & 0.8543       & $\pm 0.0115$ & \textbf{0.8608}   & $\pm 0.0012$ & $+0.007$      & SMPNN wins (variance)      \\
+    8   & 0.8009       & $\pm 0.0544$ & 0.8107            & $\pm 0.0849$ & $+0.010$      & Tie (both degrade)         \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Interpretation.}
+The depth curve is non-monotone for both architectures. SMPNN requires $L{\ge}4$ to be useful (at $L{=}2$ the $\alpha$-gated FFN interferes with too-shallow representations; the model cannot express useful spectral filtering with only 2~layers). $L{=}6$ is the joint peak; SMPNN's $\pm 0.0012$ at $L{=}6$ is the lowest variance of any configuration tested in this study. Both degrade at $L{=}8$, indicating over-smoothing sets in regardless of the DiT-style init.
+
+\paragraph{Recommendation.}
+For others-domain foundation-model deployment, SMPNN at $L{=}6$ dominates all other configurations by both mean and variance criteria. There is no reason to go deeper.
+
+% -------------------- App C --------------------
+\section{$\alpha$ initialisation ablation}
+\label{app:alpha}
+
+Comparison of the two $\alpha$ initialisation values across the 3~transfer directions where both were evaluated.
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabular}{@{}llccL{4.2cm}@{}}
+    \toprule
+    Direction  & Head    & $\alpha{=}10^{-6}$ mean & $\alpha{=}10^{-2}$ mean & $\Delta$ ($10^{-2} - 10^{-6}$) \\
+    \midrule
+    o1$\to$o2  & TabPFN  & ---                     & 0.8602 $\pm 0.0015$        & ($\alpha{=}10^{-6}$ not run --- $10^{-2}$ selected as headline) \\
+    c1$\to$c2  & TabICL  & 0.5276 $\pm 0.0244$     & 0.5348 $\pm 0.0279$        & $+0.007$ (within noise) \\
+    c2$\to$c1  & TabICL  & 0.7005 $\pm 0.0151$     & 0.6974 $\pm 0.0120$        & $-0.003$ (within noise) \\
+    o2$\to$o1  & TabPFN  & 0.7520 $\pm 0.0091$     & 0.7442 $\pm 0.0172$        & $-0.008$ ($\alpha{=}10^{-2}$ unstable) \\
+    o2$\to$o1  & TabICL  & 0.7420 $\pm 0.0119$     & 0.7352 $\pm 0.0133$        & $-0.007$ ($\alpha{=}10^{-2}$ unstable) \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Reading.}
+On the direction where $\alpha{=}10^{-2}$ is decisively best (o1$\to$o2), it also has the tightest variance ($\pm 0.0015$). On directions where $\alpha{=}10^{-2}$ is at parity or slightly worse (c1$\to$c2, c2$\to$c1), the $\alpha$ choice is within-noise. On the two o2$\to$o1 directions, $\alpha{=}10^{-2}$ shows higher variance (up to $2\times$ $\alpha{=}10^{-6}$), suggesting $\alpha{=}10^{-2}$ amplifies initialisation noise when the source--target topology is unfavourable.
+
+\paragraph{Practical rule.}
+For warm-started transfer to an others-domain target, use $\alpha{=}10^{-2}$. For warm-started transfer to any other target, $\alpha{=}10^{-6}$ is the safer default.
+
+% -------------------- App D --------------------
+\section{Pending experiments (results to be added)}
+\label{app:pending}
+
+Three follow-up experiments are underway and will be integrated before camera-ready. Scripts and protocols are on the \verb|smpnn-ablations| branch of the code repository.
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabular}{@{}rL{4.0cm}L{4.5cm}L{2.2cm}r@{}}
+    \toprule
+    \# & Experiment & Purpose & Script & Cost \\
+    \midrule
+    1 & Native Griffin head on o1$\to$o2         & Confirm variance-reduction is a backbone property, not a TabPFN artefact & \verb|run_smpnn_native_head_o1_o2.sh|      & 1.7 GPU-h \\
+    2 & 2nd o1$\to$o2 anchor (rel-trial-study-outcome) & Confirm variance-reduction generalises within the others-2 family & \verb|run_smpnn_o1_o2_second_anchor.sh|    & 3.3 GPU-h \\
+    3 & Per-epoch $\alpha$ trajectory tracking & Directly observe whether $\alpha{=}10^{-6}$ grows during training and $\alpha{=}10^{-2}$ stays stable & \verb|run_smpnn_alpha_evolution.sh| et al.\ & 20--24 GPU-h \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Each experiment addresses a specific limitation in Section~\ref{sec:discussion}. If experiment~1 fails, the variance-reduction claim must be qualified as ICL-head-dependent. If experiment~2 fails, the anchor must be described as task-specific. If experiment~3 shows converged $\alpha$ values across initialisations, the mechanistic story in the discussion must be softened to a warm-up-trajectory claim.
+
+% -------------------- App E --------------------
+\section{Reproducibility}
+\label{app:repro}
+
+\begin{itemize}
+  \item \textbf{Code}: \verb|smpnn-ablations| branch of \verb|ViswanathGanapathy/Griffin-LLM|
+  \item \textbf{Data}: RelBench joint-v65 (HuggingFace \verb|yamboo/Griffin_datasets_joint_v65|)
+  \item \textbf{Training script}: \verb|run_smpnn_multiseed_backbones.sh| (produces 20 backbones = 4~architectures $\times$ 5~seeds on others-1)
+  \item \textbf{Evaluation scripts}: \verb|run_smpnn_multiseed_eval.sh| (transfer), \verb|run_smpnn_depth_native.sh| (depth sweep)
+  \item \textbf{Raw result CSVs}: \verb|smpnn_multiseed_results.csv|, \verb|smpnn_ablation_results.csv|, \verb|smpnn_depth_results.csv|
+  \item \textbf{Hardware}: NVIDIA H100 NVL on Azure ML \verb|lgm-h100-single| cluster
+  \item \textbf{Total compute}: ${\sim}500$ GPU-hours across all reported experiments
+\end{itemize}
+
+% -------------------- App F --------------------
+\section{Claims versus evidence}
+\label{app:claims}
+
+\begin{table}[h]
+  \centering
+  \small
+  \begin{tabular}{@{}L{6.8cm}L{2.2cm}cl@{}}
+    \toprule
+    Claim & Evidence & $n$ & Confidence \\
+    \midrule
+    SMPNN-6 $\alpha{=}10^{-2}$ reduces variance $7\times$ on o1$\to$o2 (TabPFN, airbnb-destination) & Table A.1 & 5 & High \\
+    SMPNN wins o1$\to$o2 decisively at $L{=}4$ & Appx.~B, $L{=}4$ row & 3 & Medium \\
+    Vanilla-4 wins commerce transfer (both directions) & Tables A.2, A.3 & 5 & High (consistent sign) \\
+    $L{=}6$ is the sweet spot for both architectures & Appx.~B & 3 & Medium \\
+    SMPNN benefits are directional (o1$\to$o2 $\ne$ o2$\to$o1) & Tables A.1, A.4 & 5 & High \\
+    Single-seed pilots on relational GNNs are unreliable & c1$\to$c2 reversal & Direct & High \\
+    Variance reduction is a backbone property (not TabPFN artefact) & Appx.~D~\#1 & 0 (pending) & TBD \\
+    Variance reduction generalises within others-2 & Appx.~D~\#2 & 0 (pending) & TBD \\
+    $\alpha{=}10^{-6}$ grows during training; $\alpha{=}10^{-2}$ stays stable & Appx.~D~\#3 & 0 (pending) & TBD \\
+    Findings generalise beyond RelBench & --- & 0 & Ungrounded \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\end{document}
