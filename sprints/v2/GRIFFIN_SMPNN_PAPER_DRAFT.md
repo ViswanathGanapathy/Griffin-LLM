@@ -436,6 +436,124 @@ layers. L=6 is the peak for both architectures, with SMPNN achieving
 Both degrade at L=8, consistent with over-smoothing setting in
 regardless of the SMPNN residual.
 
+### 5.6 Second o1→o2 anchor: rel-trial-study-outcome *(pending)*
+
+> **STATUS: EXPERIMENT IN PROGRESS.** Numbers below are placeholders to
+> be filled in from `smpnn_o1_o2_second_anchor_results.csv` produced by
+> `run_smpnn_o1_o2_second_anchor.sh`. See "Follow-up experiments" in
+> the Appendix for the run recipe.
+
+**Motivation.** Table 5.1's variance-reduction claim rests on a single
+target task (airbnb-destination). To rule out that the 7× variance
+reduction is a task-specific artifact, we re-evaluate the same 4
+backbones × 5 seeds on **rel-trial-study-outcome**, a second binary
+AUROC classification task from the others-2 family, under both TabPFN
+v3 and TabICL v2 heads.
+
+**Task:** rel-trial-study-outcome AUROC, 5 seeds.
+
+| Backbone | TabPFN mean | ±Std | TabICL mean | ±Std |
+|---|---|---|---|---|
+| Vanilla-4 | TBD | ±TBD | TBD | ±TBD |
+| Vanilla-6 | TBD | ±TBD | TBD | ±TBD |
+| SMPNN-6 α=1e-6 | TBD | ±TBD | TBD | ±TBD |
+| SMPNN-6 α=1e-2 | TBD | ±TBD | TBD | ±TBD |
+
+**What we expect to find.** If SMPNN-6 α=1e-2 shows ≥3× lower std than
+Vanilla-6 on TabPFN here, the variance-reduction claim generalises
+within the others-2 target family and Table 5.1's finding is not an
+airbnb-destination artifact. If the variance ratio drops closer to 1×,
+the paper's headline claim must be narrowed to "task-specific
+variance reduction on airbnb-destination."
+
+**Finding.** *(to be filled in after eval completes — ~3.3 GPU-hours)*
+
+### 5.7 Native Griffin head confirmation on o1→o2 *(pending)*
+
+> **STATUS: EXPERIMENT IN PROGRESS.** Numbers below are placeholders to
+> be filled in from `smpnn_native_head_o1_o2_results.csv` produced by
+> `run_smpnn_native_head_o1_o2.sh`.
+
+**Motivation.** All results in §5.1–5.5 use TabPFN or TabICL as the
+prediction head. A confounder is that these are separately trained
+foundation models with their own inductive biases (context subsampling,
+ensembling, in-context normalization) that may absorb or amplify
+differences in the underlying Griffin encoder. To confirm that the
+variance-reduction result is a property of the SMPNN encoder itself
+and not of the ICL head, we re-evaluate the same 4 backbones × 5
+seeds with Griffin's **native head** — a linear decoder on frozen
+encoder embeddings.
+
+**Task:** others-2 direction, native head evaluation, 5 seeds.
+
+| Backbone | Mean (others-2 avg AUROC) | ±Std | Δ vs Vanilla-4 |
+|---|---|---|---|
+| Vanilla-4 | TBD | ±TBD | — |
+| Vanilla-6 | TBD | ±TBD | TBD |
+| SMPNN-6 α=1e-6 | TBD | ±TBD | TBD |
+| SMPNN-6 α=1e-2 | TBD | ±TBD | TBD |
+
+**Variance ratio comparison:**
+
+| Backbone pair | TabPFN std ratio (§5.1) | Native std ratio (§5.7) | Consistent? |
+|---|---|---|---|
+| SMPNN-6 α=1e-2 vs Vanilla-6 | 7× | TBD | TBD |
+| SMPNN-6 α=1e-2 vs Vanilla-4 | 44× | TBD | TBD |
+
+**What we expect to find.** If the ratio of SMPNN std to Vanilla std
+under the native head is within 2× of the ratio under TabPFN, the
+variance-reduction claim is a backbone property and generalises across
+prediction heads. If the ratio collapses under the native head, the
+paper must reframe the claim as "SMPNN + TabPFN together produce
+low-variance transfer" rather than "SMPNN's encoder is low-variance."
+
+**Finding.** *(to be filled in after eval completes — ~1.7 GPU-hours)*
+
+### 5.8 α evolution during training *(pending)*
+
+> **STATUS: EXPERIMENT IN PROGRESS.** Figure and numbers below are
+> placeholders to be filled in from `smpnn_alpha_evolution.csv`
+> produced by `run_smpnn_alpha_evolution.sh` +
+> `parse_alpha_evolution.py`.
+
+**Motivation.** §6.4 argues that α = 1e-2 outperforms α = 1e-6 on
+warm-started transfer because the larger init "gives the spectral
+residual a non-trivial contribution from step 1." This is a
+mechanistic claim about training dynamics but has no direct evidence
+in the current draft. To provide that evidence, we re-train SMPNN-6
+on others-1 with both α initializations across 3 seeds, logging the
+learned α values per epoch, and plot the trajectories.
+
+**Setup.** 6 trainings: 2 α inits (1e-6, 1e-2) × 3 seeds (42, 43, 44).
+Both `α_gnn[i]` (sub-block 1 residual scale) and `α_ff[i]` (sub-block 2
+residual scale) tracked at every epoch for every layer i ∈ {0..5}.
+
+**Figure 1** (placeholder). Two-panel log-scale plot: left panel shows
+α_gnn per layer over 20 epochs; right panel shows α_ff. One curve per
+(α_init, layer) pair, with light shading indicating ±1 std across
+seeds. *(To be inserted from `figs/alpha_evolution.png`.)*
+
+**Predictions.** Under §6.4's hypothesis:
+
+- α = 1e-6 curves should grow substantially during training (order
+  of magnitude or more by epoch 20) — the residual has to "wake up"
+- α = 1e-2 curves should remain stable or grow only modestly — the
+  residual is already contributing from step 1
+- The gap between the two α initializations should be largest in the
+  first few epochs and narrow as training progresses
+
+**Alternative outcomes and their implications:**
+
+| Observed pattern | Implication for §6.4 |
+|---|---|
+| α=1e-6 grows to ≥10× init; α=1e-2 stable | Mechanistic story fully confirmed |
+| Both grow to similar final values | Init affects only warm-up trajectory, not steady state — weaker claim |
+| Both stay near init | The α scalar itself is not the load-bearing part; per-layer LNs may be doing the work |
+| α diverges by layer (early layers small, late layers large) | New finding: depth-dependent residual scaling — worth its own subsection |
+
+**Finding.** *(to be filled in after training + parsing completes —
+~20-24 GPU-hours training + <1 min post-processing)*
+
 ---
 
 ## 6. Trade-offs
@@ -572,29 +690,28 @@ seeds for exploratory results and 5 seeds for headline claims.
 1. **All conclusions are drawn from RelBench joint-v65.** The
    others-vs-commerce split may not generalize to other relational
    benchmarks. Testing on 4DBInfer's broader suite would strengthen
-   the domain-specificity claim.
+   the domain-specificity claim. *(Remains open.)*
 
-2. **Only ICL heads (TabPFN, TabICL) were evaluated for cross-task
-   transfer.** Griffin's native linear head was not multi-seeded at
-   scale. It is possible that native-head results differ, especially
-   because ICL heads are separate large pretrained models that may
-   absorb or amplify SMPNN's representation differences.
+2. ~~**Only ICL heads (TabPFN, TabICL) were evaluated for cross-task
+   transfer.**~~ *Being addressed in §5.7 (native Griffin head on o1→o2,
+   pending). If §5.7 confirms the variance-reduction pattern under the
+   native head, this limitation resolves.*
 
 3. **All backbones warm-start from a vanilla checkpoint.** We do not
    know whether the commerce failure mode is intrinsic to SMPNN's
    spectral residual or an artifact of the warm-start. Training
    SMPNN from random initialization on commerce data is a natural
-   follow-up.
+   follow-up. *(Remains open.)*
 
-4. **We do not directly observe α evolution during training.**
-   Tracking whether the learned α diverges from init (and whether it
-   diverges differently between others and commerce domains) would
-   sharpen the mechanistic interpretation of why α=1e-2 outperforms
-   α=1e-6 in some settings but not others.
+4. ~~**We do not directly observe α evolution during training.**~~
+   *Being addressed in §5.8 (α evolution training + tracking, pending).
+   If §5.8 shows α=1e-6 growing substantially while α=1e-2 stays
+   stable, the mechanistic story in §6.4 is directly supported.*
 
-5. **The single-classification-task metric on o1→o2 (airbnb-destination)
-   is a narrow anchor.** Averaging over more o2 classification tasks
-   would strengthen the variance-reduction claim.
+5. ~~**The single-classification-task metric on o1→o2 (airbnb-destination)
+   is a narrow anchor.**~~ *Being addressed in §5.6 (second anchor
+   rel-trial-study-outcome, pending). If §5.6 reproduces the variance
+   ratio, the headline claim generalises within others-2.*
 
 ### 7.4 Broader implications
 
@@ -641,20 +758,40 @@ When it hurts, no amount of α tuning rescues it.
 
 - Code: `smpnn-ablations` branch of ViswanathGanapathy/Griffin-LLM
 - Data: RelBench joint-v65 (HuggingFace: `yamboo/Griffin_datasets_joint_v65`)
-- Scripts: `run_smpnn_multiseed_backbones.sh`, `run_smpnn_multiseed_eval.sh`
+- Primary scripts: `run_smpnn_multiseed_backbones.sh`,
+  `run_smpnn_multiseed_eval.sh`
 - Raw results: `smpnn_multiseed_results.csv`, `smpnn_ablation_results.csv`,
   `smpnn_depth_results.csv`
 - Full trace of interpretations: [SMPNN_MASTER_RESULTS.md](SMPNN_MASTER_RESULTS.md)
+
+### A.1 Follow-up experiments (§5.6, §5.7, §5.8 — pending)
+
+| Section | Script | Output CSV | Wall time |
+|---|---|---|---|
+| §5.6 (2nd anchor) | `run_smpnn_o1_o2_second_anchor.sh` | `smpnn_o1_o2_second_anchor_results.csv` | ~3.3 GPU-h |
+| §5.7 (native head) | `run_smpnn_native_head_o1_o2.sh` | `smpnn_native_head_o1_o2_results.csv` | ~1.7 GPU-h |
+| §5.8 (α evolution) | `run_smpnn_alpha_evolution.sh` + `parse_alpha_evolution.py` + `plot_alpha_evolution.py` | `smpnn_alpha_evolution.csv`, `figs/alpha_evolution.png` | ~20-24 GPU-h |
+
+All three reuse the same seed 42-46 backbone checkpoints from
+`run_smpnn_multiseed_backbones.sh` (except §5.8, which produces fresh
+checkpoints with per-epoch α logging enabled via `--log_alpha_every 1`).
+
+Each script writes per-cell tee logs to `logs/<experiment-name>/<tag>.log`
+and skips completed cells via a per-log `test_metric/` line count check
+(or `best_checkpoint` existence check for training scripts).
 
 ## Appendix B — Which claims are supported by what evidence
 
 | Claim | Evidence | Confidence |
 |---|---|---|
-| SMPNN-6 α=1e-2 reduces variance 7× on o1→o2 | Table 5.1, n=5 | High (5 seeds) |
+| SMPNN-6 α=1e-2 reduces variance 7× on o1→o2 (airbnb-destination, TabPFN) | Table 5.1, n=5 | High (5 seeds, single task, single head) |
 | SMPNN wins o1→o2 decisively | Table 5.5, L=4 (n=3) | Medium (3 seeds, single task) |
 | Vanilla-4 wins commerce transfer | Tables 5.2, 5.3 (n=5) | High (5 seeds, consistent sign) |
 | L=6 is the sweet spot | Table 5.5 (n=3) | Medium (3 seeds) |
 | SMPNN benefits are directional (o1→o2 ≠ o2→o1) | Table 5.4 (n=5) | High |
 | Single-seed pilots on relational GNNs are unreliable | Reversal of c1→c2 claim from n=1 to n=5 | Direct evidence |
-| Native Griffin head behaves similarly | *No data yet* | Ungrounded |
+| Variance reduction is a backbone property, not a TabPFN artifact | §5.7 (pending) | *TBD* |
+| Variance reduction generalises within others-2 target family | §5.6 (pending, rel-trial-study-outcome) | *TBD* |
+| α = 1e-6 grows during training; α = 1e-2 stays stable | §5.8 (pending, α trajectories) | *TBD* |
+| Native Griffin head behaves similarly to ICL heads | §5.7 (pending) | *TBD* |
 | Findings generalize beyond RelBench | *No data* | Ungrounded |
