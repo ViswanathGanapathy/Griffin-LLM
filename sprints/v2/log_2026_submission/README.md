@@ -41,12 +41,17 @@ Currently anonymised. For camera-ready, replace the `\author` block near the top
 ## Page limits
 
 - **Extended abstract track: 4 pages of main text** (excluding references and appendix, per LoG guidelines)
-- Appendix is unlimited but reviewers may not read all of it — keep essential evidence in the main body
+- References and appendix follow after the 4-page cutoff and are unlimited but reviewers may not read all of it — keep essential evidence in the main body
 
-The current main body sections (1–5) should compile to ~4 pages. Verify after first compile — if it overflows, easiest cuts are:
-1. Shorten §5 Discussion (currently 2 paragraphs + limitations)
-2. Trim §3 Setup dense inline text
-3. Move Table 1 into a `\small` size (currently already `\small`)
+The current main body (§1–§5) is ~2,740 words including Table 1 and Eq. (1)–(3). On the LoG 2026 single-column layout this should land at ~4–4.5 pages. **Verify after first compile.** If it overflows by a small amount, easiest cuts (in priority order):
+
+1. Trim the Related Work paragraph in §2 (already the shortest section, but 1–2 more sentences can go)
+2. Merge the two Griffin encoder paragraphs into one
+3. Cut the "Connection to Transformer depth-scaling" paragraph in §5 to a single sentence
+4. Drop the parenthetical raw-seed values in §4 finding (ii) (already in Appendix A.1)
+5. Move the "Design rationale" and "$\alpha$ as a hyperparameter" paragraphs from §2 to Appendix (about 200 words)
+
+Any one of these should be enough to bring it within 4 pages if it overshoots.
 
 ## Fill-in checklist before submission
 
