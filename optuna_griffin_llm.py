@@ -330,6 +330,7 @@ def construct_dataset(graph, task, tasknames, split, batchsize, fanout, hop,
         subgraphargs={
             "floatemb": floatembmodel,
             "fanout": fanout,
+            "fanout_decay": getattr(args, "fanout_decay", 1.0),
             "hop": hop,
         },
         shuffle=True if split == "train" else False,
@@ -725,6 +726,9 @@ if __name__ == "__main__":
     # Default search ranges (can be overridden)
     parser.add_argument("--num_mp", type=int, default=4)
     parser.add_argument("--fanout", type=int, default=20)
+    parser.add_argument("--fanout_decay", type=float, default=1.0,
+                        help="Geometric per-hop fanout shrink factor. "
+                             "1.0 (default) = constant fanout at every hop.")
     parser.add_argument("--hop", type=int, default=2)
     parser.add_argument("--use_lora", action="store_true", default=False)
     parser.add_argument("--lora_r", type=int, default=8)

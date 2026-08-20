@@ -1,4 +1,5 @@
 import yaml
+import math
 import os.path as osp
 import torch
 import torch.nn.functional as F
@@ -182,8 +183,25 @@ class Graph:
         hop: int,
         floatemb,
         fanout: int = INF,
+        fanout_decay: float = 1.0,
         timestamp: Union[list[int], None] = None,
     ):
+        """Sample a subgraph rooted at ``root_nodeidx``.
+
+        Args:
+            fanout: maximum neighbours per (source-node, edge-type) at hop 0.
+                Set to ``INF`` for no cap (original behaviour).
+            fanout_decay: geometric per-hop shrink factor. Hop ``h`` uses
+                ``max(1, ceil(fanout * fanout_decay ** h))`` neighbours.
+                Default ``1.0`` -> constant fanout across all hops
+                (identical to pre-decay behaviour). Values in ``(0, 1)``
+                shrink outer rings (recommended when ``hop`` >= 4 to keep
+                subgraphs manageable). Values ``> 1`` grow outer rings.
+                Ignored when ``fanout >= INF``.
+        """
+        assert fanout_decay > 0, (
+            f"fanout_decay must be > 0, got {fanout_decay}"
+        )
         hastimestamp: bool = timestamp is not None
         adj = {}
         node = {}
@@ -208,12 +226,20 @@ class Graph:
             return d
 
         for h in range(hop):
+            # Per-hop decaying fanout. Ring 0 uses the full `fanout`;
+            # each outer ring shrinks by `fanout_decay` (ceil, floored at 1).
+            # decay == 1.0 -> identical to a constant fanout.
+            # INF (no cap) stays uncapped.
+            if fanout >= INF:
+                hop_fanout = fanout
+            else:
+                hop_fanout = max(1, math.ceil(fanout * (fanout_decay ** h)))
             nroot, nroottimestamp = {}, {}
             for nodetype in root:
                 found_src_num = dictgetlen(node, nodetype)
                 # print(list(self.nodes.keys()), list(root.keys()), list(roottimestamp.keys()))
                 ttadj = self.nodes[nodetype].getedge(
-                    root[nodetype], fanout, roottimestamp[nodetype]
+                    root[nodetype], hop_fanout, roottimestamp[nodetype]
                 )
                 for edgetype in ttadj:
                     srcidx, taridx = ttadj[edgetype][0], ttadj[edgetype][1]

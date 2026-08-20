@@ -75,6 +75,7 @@ def construct_dataset(graph, task, tasknames, split, args, floatembmodel):
         subgraphargs={
             "floatemb": floatembmodel,
             "fanout": args.fanout,
+            "fanout_decay": getattr(args, "fanout_decay", 1.0),
             "hop": args.hop,
         },
         shuffle=True if split == "train" else False,
@@ -351,6 +352,9 @@ if __name__ == "__main__":
     parser.add_argument("--num_mp", type=int, default=4)
     parser.add_argument("--hiddim", type=int, default=256)
     parser.add_argument("--fanout", type=int, default=10)
+    parser.add_argument("--fanout_decay", type=float, default=1.0,
+                        help="Geometric per-hop fanout shrink factor. "
+                             "1.0 (default) = constant fanout at every hop.")
     parser.add_argument("--fewshotfanout", type=int, default=3)
     parser.add_argument("--hop", type=int, default=2)
     parser.add_argument("--use_rev", type=str2bool, default=True)
