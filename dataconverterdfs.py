@@ -113,6 +113,29 @@ def core_rel(relname: str) -> str:
     return relname.replace("head of ", "").replace("tail of ", "")
 
 
+def process_in_chunks(idx, ts, fn, min_rows=1024):
+    """Run fn(idx_chunk, ts_chunk) over row chunks, halving on CPU OOM.
+
+    getedge pads every row's neighbor list to the batch max
+    (pad_sequence), so a single high-degree hub row (e.g. a prolific
+    stackexchange user with 50K+ votes) can make a large batch demand
+    tens of GB. Splitting the chunk shrinks rows-x-maxlen until it
+    fits; per-row results are independent, so splitting is exact.
+    """
+    stack = [(0, len(idx))]
+    while stack:
+        a, b = stack.pop()
+        try:
+            fn(idx[a:b], None if ts is None else ts[a:b])
+        except RuntimeError as e:
+            if "allocate" in str(e).lower() and (b - a) > min_rows:
+                m = (a + b) // 2
+                print(f"    [oom-split] rows {a}..{b} -> two halves", flush=True)
+                stack += [(m, b), (a, m)]
+            else:
+                raise
+
+
 def aggregate_batch(src, tar, values_by_feat, num_src):
     """Scatter count/mean/max for one (relation, batch).
 
@@ -199,9 +222,7 @@ def compute_depth1(graph: Graph, nodetype: str, args):
     feat = torch.zeros((num, len(names)), dtype=torch.float32)
     col_index = {n: i for i, n in enumerate(names)}
 
-    for start in range(0, num, args.batch_rows):
-        idx = torch.arange(start, min(start + args.batch_rows, num))
-        ts = ts_all[idx] if temporal else None
+    def _d1_chunk(idx, ts):
         ttadj = node.getedge(idx, INF, ts)
         for r, (src, tar) in ttadj.items():
             if r not in relcols:
@@ -216,8 +237,13 @@ def compute_depth1(graph: Graph, nodetype: str, args):
                     feat[idx, col_index[f"dfs1__{prim}__{tag}__{c}"]] = (
                         aggs[f"{prim}__{c}"]
                     )
+
+    for start in range(0, num, args.batch_rows):
+        idx = torch.arange(start, min(start + args.batch_rows, num))
+        ts = ts_all[idx] if temporal else None
+        process_in_chunks(idx, ts, _d1_chunk)
         if start == 0 or (start // args.batch_rows) % 10 == 0:
-            print(f"    [{nodetype}] d1 rows {start}..{idx[-1].item()}")
+            print(f"    [{nodetype}] d1 rows {start}..{idx[-1].item()}", flush=True)
 
     # log1p counts (heavy-tailed) before normalization
     for i, n in enumerate(names):
@@ -261,9 +287,7 @@ def compute_depth2(graph: Graph, nodetype: str, d1_store, args):
     for k, (r, j, _) in enumerate(plan):
         by_rel.setdefault(r, []).append((k, j))
 
-    for start in range(0, num, args.batch_rows):
-        idx = torch.arange(start, min(start + args.batch_rows, num))
-        ts = ts_all[idx] if temporal else None
+    def _d2_chunk(idx, ts):
         ttadj = node.getedge(idx, INF, ts)
         for r, (src, tar) in ttadj.items():
             if r not in by_rel:
@@ -277,6 +301,11 @@ def compute_depth2(graph: Graph, nodetype: str, d1_store, args):
                 v = b_feat[tar, j]
                 s = torch.zeros(len(idx)).scatter_add_(0, src, v)
                 feat[idx, k] = s / safe
+
+    for start in range(0, num, args.batch_rows):
+        idx = torch.arange(start, min(start + args.batch_rows, num))
+        ts = ts_all[idx] if temporal else None
+        process_in_chunks(idx, ts, _d2_chunk)
     # Cap total d2 features by variance
     if feat.shape[1] > args.max_d2_feats:
         keep = torch.topk(feat.var(dim=0), args.max_d2_feats).indices.sort().values
