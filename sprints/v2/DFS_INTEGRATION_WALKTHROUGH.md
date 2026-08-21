@@ -31,6 +31,39 @@ dataconverterdfs.py              hmaintask_combine*.py  (flags)
                                               └─ hmodel*.py  (UNCHANGED)
 ```
 
+### 0b. Where DFS and the MPNN updates combine
+
+DFS and native message passing ARE combined — at the
+**representation level**, not in the update rule:
+
+```
+vanilla:      x0 = Attn( taskfeat ; native columns )
+DFS-Griffin:  x0 = Attn( taskfeat ; native ∪ DFS columns )
+then, unchanged:  x ← MPNN/SMPNN layer updates on x
+```
+
+Two properties make this deeper than "input features":
+
+1. **Per-layer re-attention.** Griffin's forward loop
+   ([hmodel_smpnn.py:338-353](../../hmodel_smpnn.py#L338-L353); same
+   structure in hmodel.py) re-merges the raw column set at EVERY MP
+   layer via `nodefeataggr[i]`, conditioned on a task prompt refreshed
+   from the evolving node states (`lintask[i]`). DFS columns are
+   therefore consulted L times with layer-specific, task-conditioned
+   weights — the column attention is the (learned) gate that decides
+   how much exact-aggregate vs learned-sampled signal each layer uses.
+2. **Graph propagation.** Once merged into `x`, DFS-derived signal
+   travels through messages like any feature: leaf summaries reach the
+   target over the `"fewshot"` edge; enriched root-type neighbors'
+   summaries travel over relational edges.
+
+Alternatives deliberately not taken: a fourth branch in the layer
+equation (`+ g_dfs · MLP(dfs)`) — extra parameters, breaks checkpoint
+compatibility, redundant with per-layer re-attention; and head-level
+concatenation (`[Griffin emb | DFS] → TabPFN`) — that is RDBLearn's
+own configuration, tracked as a future baseline in
+[DFS_GRIFFIN_DESIGN.md §7](DFS_GRIFFIN_DESIGN.md).
+
 ---
 
 ## 1. Phase 0 — offline artifact computation (shared by both paths)
