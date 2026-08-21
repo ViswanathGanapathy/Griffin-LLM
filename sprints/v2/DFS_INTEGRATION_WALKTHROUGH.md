@@ -143,6 +143,47 @@ save `dfs/<nt>/d1.pt`, `dfs/<nt>/d2.pt`, `metadfs.yaml`
 runs load and update existing meta/nameemb (lines ~330–346) instead of
 overwriting earlier runs.
 
+### 1.5 Column-NAME embeddings — `build_nameemb` / `primitive_tag` / `compose_nameemb` ([dataconverterdfs.py:63–76, 78–85, 295–](../../dataconverterdfs.py#L63-L85))
+
+Every DFS column gets a name embedding, because Griffin's column
+attention scores columns against the task prompt *via their name
+embeddings* — a DFS column without one would be semantically
+unaddressable. Two generation modes:
+
+- **Compositional (default, CPU-only).** The embedding is a normalized
+  sum of embeddings the dataset already has:
+  - `dfs1__count__<rel>`         → `norm( edgenameemb[rel] + tag("count") )`
+  - `dfs1__<prim>__<rel>__<col>` → `norm( edgenameemb[rel] + featnameemb[col] + tag(prim) )`
+  - `dfs2__mean__<rel>__<d1>`    → `norm( edgenameemb[rel] + dfs1_emb[d1] + tag("dfs2_mean") )`
+  Because the parts are Nomic vectors, compositions land in the same
+  512-d semantic space as native column names; the feature's meaning
+  literally *is* (relation ⊕ source column ⊕ primitive). The two-stage
+  build in `main` (d1 embeddings first, then d2 which reference them)
+  is at lines ~412–422.
+- **`--nomic`.** True Nomic encoding of the human-readable name
+  (`"dfs1 mean <relation> <column>"`), same model and `"clustering: "`
+  prompt as `dataconverterpost.py`. More faithful; needs
+  sentence-transformers.
+
+**`primitive_tag` determinism (bug found in review, fixed in
+`ba7a993`).** The tag — a fixed pseudo-random unit vector that keeps
+mean/max/count of the same (relation, column) from colliding — was
+originally seeded with Python's built-in `hash(name)`, which is
+**salted per process** (PYTHONHASHSEED) since Python 3.3. Each
+converter run was internally consistent but run-to-run different:
+regenerating artifacts on another machine would silently unbind
+existing checkpoints from their DFS name embeddings. Now seeded by an
+md5 content hash (lines 71–73), verified identical across separate
+processes. **Reviewer check:** any artifacts generated before
+`ba7a993` should be regenerated before being shared or compared
+cross-machine.
+
+**Runtime consumption** is §2.2/§2.3: `getdfsfeat` returns the stacked
+name embeddings alongside the value embeddings, the append site
+extends `nodenameemb` together with the features, and the column
+attention treats DFS names identically to native ones (including the
+per-layer re-attention of §0b).
+
 ---
 
 ## 2. Runtime shared machinery
@@ -277,6 +318,8 @@ called out in [DFS_GRIFFIN_DESIGN.md §3](DFS_GRIFFIN_DESIGN.md).
 | z-norm + log1p | d1.pt mean≈0/std≈1; counts log1p'd pre-norm | integration check (`d1 mean~0/std~1`) |
 | `load_dfs` failure mode | missing artifacts → explicit error naming converter | code read (lines 185–190) |
 | `getdfsfeat` alignment | names order == matrix column order; cumulative depth | T2 |
+| Name-emb generation (§1.5) | compositional parts resolve (rel/feat/d1 keys exist); two-stage d1→d2 build order | code read (build_nameemb, main ~412–422) |
+| `primitive_tag` determinism | identical vectors across separate processes (md5, not salted `hash()`) | 2-process check in `ba7a993` commit; artifacts pre-`ba7a993` must be regenerated |
 | Append site row alignment | indices captured pre-`getfeat`; feat+nameemb extended together | T1 (native cols bit-equal), T2 |
 | `dfs_depth=0` no-op | bit-identical batches under fixed seed | T1 |
 | Fewshot routing (A2/A3) | pop keeps `**subgraphargs` valid; leaf call gets own depth | T6 (all 4 flag combos), T2 (hop-0 shape) |
