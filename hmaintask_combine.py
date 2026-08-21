@@ -76,6 +76,8 @@ def construct_dataset(graph, task, tasknames, split, args, floatembmodel):
             "fanout": args.fanout,
             "fanout_decay": getattr(args, "fanout_decay", 1.0),
             "hop": args.hop,
+            "dfs_depth": getattr(args, "dfs_root_depth", 0),
+            "dfs_fewshot_depth": getattr(args, "dfs_fewshot_depth", 0),
         },
         shuffle=True if split == "train" else False,
         task=task,
@@ -396,6 +398,17 @@ if __name__ == "__main__":
                              "--fanout is unset (INF).")
     parser.add_argument("--fewshotfanout", type=int, default=3)
     parser.add_argument("--hop", type=int, default=2)
+    parser.add_argument("--dfs_root_depth", type=int, default=0, choices=[0, 1, 2],
+                        help="Append precomputed DFS aggregate columns to ROOT "
+                             "nodes in the sampled subgraph. 0 = off (default). "
+                             "1 = one-hop aggregates; 2 = one- and two-hop. "
+                             "Requires `python dataconverterdfs.py <dataset>` "
+                             "to have been run first.")
+    parser.add_argument("--dfs_fewshot_depth", type=int, default=0, choices=[0, 1, 2],
+                        help="Append precomputed DFS aggregate columns to the "
+                             "hop-0 FEWSHOT leaves — one-hop neighborhood "
+                             "context without graph expansion. 0 = off "
+                             "(default); 1 recommended.")
     parser.add_argument("--use_rev", type=str2bool, default=True)
     parser.add_argument("--use_gate", type=str2bool, default=True)
     parser.add_argument("--use_smpnn", action="store_true", default=False,

@@ -138,6 +138,8 @@ def edgename2head(edgename: str):
 class Graph:
 
     def __init__(self, path) -> None:
+        self.path = path
+        self._dfs = None  # lazy: {"meta", "feat": {(nt, depth): tensor}, "nameemb"}
         with open(osp.join(path, "metanode.yaml")) as f:
             metanode = yaml.safe_load(f)
         with open(osp.join(path, "metaadj.yaml")) as f:
@@ -176,6 +178,59 @@ class Graph:
             for nodetype in self.metanode
         }
 
+    def load_dfs(self):
+        """Lazily load precomputed DFS artifacts (see dataconverterdfs.py)."""
+        if self._dfs is not None:
+            return self._dfs
+        dfsdir = osp.join(self.path, "dfs")
+        metapath = osp.join(dfsdir, "metadfs.yaml")
+        if not osp.exists(metapath):
+            raise FileNotFoundError(
+                f"DFS features requested but {metapath} not found. "
+                f"Run: python dataconverterdfs.py {self.path}"
+            )
+        with open(metapath) as f:
+            meta = yaml.safe_load(f)
+        feat = {}
+        for nt in meta:
+            for depth in ("d1", "d2"):
+                p = osp.join(dfsdir, nt, f"{depth}.pt")
+                if depth in meta[nt] and osp.exists(p):
+                    feat[(nt, depth)] = torch.load(
+                        p, map_location="cpu", weights_only=True
+                    )
+        nameemb = torch.load(
+            osp.join(dfsdir, "dfsfeatnameemb.pt"),
+            map_location="cpu", weights_only=True,
+        )
+        self._dfs = {"meta": meta, "feat": feat, "nameemb": nameemb}
+        return self._dfs
+
+    def getdfsfeat(self, nodetype: str, idx: torch.Tensor, depth: int, floatemb):
+        """Embedded DFS columns for `idx` rows of `nodetype`.
+
+        depth is cumulative: 1 -> d1 columns; 2 -> d1 + d2 columns.
+        Returns (feat (B, C_dfs, D), nameemb (C_dfs, D)) or (None, None)
+        if this node type has no DFS features (e.g. no relations).
+        """
+        dfs = self.load_dfs()
+        if nodetype not in dfs["meta"]:
+            return None, None
+        depths = ["d1"] if depth == 1 else ["d1", "d2"]
+        cols, names = [], []
+        for d in depths:
+            if (nodetype, d) not in dfs["feat"]:
+                continue
+            vals = dfs["feat"][(nodetype, d)][idx]  # (B, C_d) float32, z-normed
+            for j, name in enumerate(dfs["meta"][nodetype][d]["names"]):
+                cols.append(floatemb(vals[:, j].contiguous()))  # (B, D)
+                names.append(name)
+        if not cols:
+            return None, None
+        feat = torch.stack(cols, dim=1)  # (B, C_dfs, D)
+        nameemb = torch.stack([dfs["nameemb"][n] for n in names], dim=0)
+        return feat, nameemb
+
     def subgraph(
         self,
         root_nodetype: str,
@@ -184,6 +239,7 @@ class Graph:
         floatemb,
         fanout: int = INF,
         fanout_decay: float = 1.0,
+        dfs_depth: int = 0,
         timestamp: Union[list[int], None] = None,
     ):
         """Sample a subgraph rooted at ``root_nodeidx``.
@@ -193,11 +249,15 @@ class Graph:
                 Set to ``INF`` for no cap (original behaviour).
             fanout_decay: geometric per-hop shrink factor. Hop ``h`` uses
                 ``max(1, ceil(fanout * fanout_decay ** h))`` neighbours.
-                Default ``1.0`` -> constant fanout across all hops
-                (identical to pre-decay behaviour). Values in ``(0, 1)``
-                shrink outer rings (recommended when ``hop`` >= 4 to keep
-                subgraphs manageable). Values ``> 1`` grow outer rings.
+                Default ``1.0`` -> identical to a constant fanout.
                 Ignored when ``fanout >= INF``.
+            dfs_depth: 0 (default) = off. 1 or 2 appends precomputed DFS
+                aggregate columns (see dataconverterdfs.py) to the ROOT
+                node type's features and column-name embeddings. Depth is
+                cumulative (2 = d1 + d2 columns). DFS features are
+                precomputed at each node's own timestamp with a strict
+                past-only cutoff, so no extra timestamp handling is
+                needed here.
         """
         assert fanout_decay > 0, (
             f"fanout_decay must be > 0, got {fanout_decay}"
@@ -283,8 +343,11 @@ class Graph:
         mapping = torch.arange(len(root_nodeidx), device=root_nodeidx.device)
         # not change, latter code depends on mapping == arange
 
+        dfs_root_idx = None
         for nodetype in node:
             assert len(node[nodetype]), f"{list(node.keys())} {root_nodeidx.shape} {list(adj.keys())}"
+            if dfs_depth > 0 and nodetype == root_nodetype:
+                dfs_root_idx = node[nodetype]  # raw indices, pre-replacement
             #unique_idx, inv = torch.unique(node[nodetype], return_inverse=True)
             #node[nodetype] = self.nodes[nodetype].getfeat(unique_idx, floatemb)[inv]
             node[nodetype] = self.nodes[nodetype].getfeat(node[nodetype], floatemb)
@@ -296,6 +359,22 @@ class Graph:
             )
             for nodetype in node
         }
+
+        # Append precomputed DFS aggregate columns to the root node type.
+        # Column attention is shape-agnostic, so downstream code (masks,
+        # scalefeat, the model) adapts automatically; loaders pad
+        # target_feat_mask for the extra columns.
+        if dfs_depth > 0 and dfs_root_idx is not None:
+            dfsfeat, dfsnameemb = self.getdfsfeat(
+                root_nodetype, dfs_root_idx, dfs_depth, floatemb
+            )
+            if dfsfeat is not None:
+                node[root_nodetype] = torch.concat(
+                    (node[root_nodetype], dfsfeat), dim=1
+                )
+                nodenameemb[root_nodetype] = torch.concat(
+                    (nodenameemb[root_nodetype], dfsnameemb), dim=0
+                )
         # print("loader: ", len(node), len(adj), list(nodenameemb.keys()), list(edgenameemb.keys()))
 
         return node, adj, nodenameemb, edgenameemb, mapping

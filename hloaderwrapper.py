@@ -70,6 +70,23 @@ def scalefeat(node, taskfeat, edge_attr, y=None):
         y = F.layer_norm(y, shape)
     return node, taskfeat, edge_attr, y
 
+def pad_feat_mask(target_feat_mask: torch.Tensor, num_cols: int) -> torch.Tensor:
+    """Pad a per-column visibility mask with True for appended DFS columns.
+
+    target_feat_mask comes from Task.get_retrieval/get_regression and is
+    sized to the node type's native columns. When Graph.subgraph appends
+    DFS aggregate columns (dfs_depth > 0), the feature tensor has more
+    columns; the extra ones are always visible (True) — they aggregate
+    neighbor values, never the row's own masked target column.
+    """
+    pad = num_cols - target_feat_mask.shape[0]
+    if pad <= 0:
+        return target_feat_mask
+    return torch.cat(
+        (target_feat_mask, torch.ones(pad, dtype=torch.bool)), dim=0
+    )
+
+
 def buildindice(shuffle, lens, batch_size):
     ind = []
     if not shuffle:
@@ -197,6 +214,11 @@ class LoaderWrapper:
         self.graph = graph
         self.batch_size = batch_size
         self.shuffle = shuffle
+        # dfs_fewshot_depth applies only to the hop-0 fewshot-leaf subgraphs;
+        # it is popped here so **subgraphargs stays valid for Graph.subgraph
+        # (whose own dfs_depth key, if present, applies to the main subgraph).
+        subgraphargs = dict(subgraphargs)
+        self.dfs_fewshot_depth = subgraphargs.pop("dfs_fewshot_depth", 0)
         self.subgraphargs = subgraphargs
         self.lens = [(nodetype, self.graph.metanode[nodetype]["num"]) for nodetype in self.graph.metanode]
         self.ind = None
@@ -231,6 +253,10 @@ class LoaderWrapper:
     def fewshotsubgraph(self, nodetype, ind, timestamp=None):
         tmpargs = copy.copy(self.subgraphargs)
         tmpargs["hop"] = 0
+        # Fewshot leaves get their own DFS depth (typically 1): a one-hop
+        # aggregate summary of each leaf's neighborhood, appended as extra
+        # feature columns — neighborhood context without graph expansion.
+        tmpargs["dfs_depth"] = self.dfs_fewshot_depth
         return self.graph.subgraph(nodetype, ind, **tmpargs, timestamp=timestamp)
 
     def fewshotroot(self, rootnodetype, tind, taskmask, roottimestamp=None):
@@ -321,6 +347,7 @@ class LoaderWrapperRetrieval(LoaderWrapper):
         y = y.squeeze_(1)
 
         node, adj, nodenameemb, edgenameemb, mapping = self.subgraph(nodetype, tind)
+        target_feat_mask = pad_feat_mask(target_feat_mask, node[nodetype].shape[1])
         node[nodetype] = node[nodetype][:, target_feat_mask]
         nodenameemb[nodetype] = nodenameemb[nodetype][target_feat_mask]
 
@@ -355,6 +382,7 @@ class LoaderWrapperRegression(LoaderWrapper):
         nodetype, target_feat_mask, tind, label, tasktimestamp, tasknameemb, _ = self.task.get_regression(self.graph, taskname, self.split, tind)
 
         node, adj, nodenameemb, edgenameemb, mapping = self.subgraph(nodetype, tind)
+        target_feat_mask = pad_feat_mask(target_feat_mask, node[nodetype].shape[1])
         node[nodetype] = node[nodetype][:, target_feat_mask]
         nodenameemb[nodetype] = nodenameemb[nodetype][target_feat_mask]
 
@@ -406,11 +434,15 @@ class LoaderWrapperTask(LoaderWrapper):
         taskfeat = [tasknameemb for i in range(len(node))]
         mask = [None for i in range(len(node))]
         mask[0] = torch.zeros(node[0][1].shape[:2], dtype=torch.bool)
-        mask[0][mapping] = torch.logical_not(target_feat_mask)
+        # Pad with True (visible) for DFS columns appended by dfs_depth > 0
+        padded_tfm = pad_feat_mask(target_feat_mask, node[0][1].shape[1])
+        mask[0][mapping] = torch.logical_not(padded_tfm)
         # [F.one_hot(labelidx[i], num_classes=node[i][1].shape[1]).to(torch.bool) for i in range(len(node))]
-        
+
         if self.fewshotfanout > 0:
-            fewshot_center, tarnode = self.fewshotroot(rootnodetype, tind, mask[0][mapping], tasktimestamp)
+            # fewshot() similarity scoring expects native-width masks
+            native_c = target_feat_mask.shape[0]
+            fewshot_center, tarnode = self.fewshotroot(rootnodetype, tind, mask[0][mapping][:, :native_c], tasktimestamp)
 
             fewshotnode, fewshotadj, fewshotnodenameemb, fewshotedgenameemb, fewshotmapping = self.fewshotsubgraph(rootnodetype, fewshot_center, None if tasktimestamp is None else tasktimestamp[tarnode])
             fewshotnode, fewshotedge_index, fewshotedge_attr_type, fewshotedge_attr = unifyheterograph(rootnodetype, fewshotnode, fewshotnodenameemb, fewshotedgenameemb, fewshotadj)
@@ -469,9 +501,12 @@ class LoaderWrapperTaskLLM(LoaderWrapperTask):
         taskfeat = [tasknameemb for i in range(len(node))]
         mask = [None for i in range(len(node))]
         mask[0] = torch.zeros(node[0][1].shape[:2], dtype=torch.bool)
-        mask[0][mapping] = torch.logical_not(target_feat_mask)
+        # Pad with True (visible) for DFS columns appended by dfs_depth > 0
+        padded_tfm = pad_feat_mask(target_feat_mask, node[0][1].shape[1])
+        mask[0][mapping] = torch.logical_not(padded_tfm)
 
         # Collect visible feature names for the root entity
+        # (zip against the UNPADDED mask: names cover native columns only)
         all_feats = self.graph.metanode[rootnodetype].get("feat", [])
         feature_names = [f for f, vis in zip(all_feats, target_feat_mask.tolist()) if vis]
 
@@ -498,7 +533,9 @@ class LoaderWrapperTaskLLM(LoaderWrapperTask):
             neighbor_mask[neighbor_indices] = True
 
         if self.fewshotfanout > 0:
-            fewshot_center, tarnode = self.fewshotroot(rootnodetype, tind, mask[0][mapping], tasktimestamp)
+            # fewshot() similarity scoring expects native-width masks
+            native_c = target_feat_mask.shape[0]
+            fewshot_center, tarnode = self.fewshotroot(rootnodetype, tind, mask[0][mapping][:, :native_c], tasktimestamp)
 
             fewshotnode, fewshotadj, fewshotnodenameemb, fewshotedgenameemb, fewshotmapping = self.fewshotsubgraph(rootnodetype, fewshot_center, None if tasktimestamp is None else tasktimestamp[tarnode])
             fewshotnode, fewshotedge_index, fewshotedge_attr_type, fewshotedge_attr = unifyheterograph(rootnodetype, fewshotnode, fewshotnodenameemb, fewshotedgenameemb, fewshotadj)
