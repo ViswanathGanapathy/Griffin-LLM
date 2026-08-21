@@ -22,6 +22,7 @@ SEEDS=${SEEDS:-"42 43 44"}
 CELLS=${CELLS:-"E0 E1 E2 E3"}
 BACKBONES=${BACKBONES:-"smpnn vanilla"}
 EVAL_FAMILY=${EVAL_FAMILY:-others-2}
+TABPFN_VERSION=${TABPFN_VERSION:-v3}   # v2.5 | v2.6 | v3 (see DFS_ABLATION_PLAN.md)
 REUSE_E0=${REUSE_E0:-1}
 FORCE=${FORCE:-0}
 
@@ -52,7 +53,7 @@ cell_is_complete() {
 
 eval_one() {
     local CELL=$1 DFS_FS=$2 DFS_ROOT=$3 BACKBONE=$4 SEED=$5
-    local TAG="s${SEED}-${CELL}-${BACKBONE}-$(echo $EVAL_FAMILY | tr -d '-')"
+    local TAG="s${SEED}-${CELL}-${BACKBONE}-$(echo $EVAL_FAMILY | tr -d '-')-tabpfn$(echo $TABPFN_VERSION | tr -d '.')"
     local CELL_LOG="${EVAL_LOGDIR}/${TAG}.log"
 
     local found=0
@@ -98,7 +99,7 @@ eval_one() {
         --batchsize 256 \
         --output_mlp_dim 1 --no_target_normalize \
         --icl_n_estimators 8 --icl_max_context 30000 \
-        --tabpfn_version v3 --tabpfn_fit_mode fit_with_cache \
+        --tabpfn_version ${TABPFN_VERSION} --tabpfn_fit_mode fit_with_cache \
         --tabpfn_inference_precision autocast \
         --tabpfn_inference_config {\"MAX_NUMBER_OF_SAMPLES\":50000,\"MAX_NUMBER_OF_FEATURES\":600} \
         --savepath checkpoints/smpnn-dfs-eval-${TAG} \
@@ -108,6 +109,7 @@ eval_one() {
 echo "=========================================="
 echo "DFS eval: cells [$CELLS] x backbones [$BACKBONES] x seeds [$SEEDS]"
 echo "  eval family: $EVAL_FAMILY (test split)   REUSE_E0=$REUSE_E0"
+echo "  TabPFN version: $TABPFN_VERSION"
 echo "  logs: ${EVAL_LOGDIR}/"
 echo "=========================================="
 
