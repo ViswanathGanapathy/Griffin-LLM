@@ -163,7 +163,12 @@ def t4_leakage_handcheck(g):
         src, tar = ttadj[rel]
         if len(tar) == 0:
             continue
-        hand = torch.nan_to_num(colvals[tar].to(torch.float32)).mean()
+        # NaN-skipping mean, matching featuretools/SQL semantics
+        v = colvals[tar].to(torch.float32)
+        v = v[torch.isfinite(v)]
+        if len(v) == 0:
+            continue
+        hand = v.mean()
         assert torch.allclose(hand, stored[i], atol=1e-3), \
             f"node {i}: hand={hand.item():.5f} stored={stored[i].item():.5f}"
         checked += 1

@@ -111,19 +111,30 @@ def aggregate_batch(src, tar, values_by_feat, num_src):
     src: (E,) local source indices; tar: (E,) global neighbor indices.
     values_by_feat: {featname: (num_B,) float tensor} — full columns.
     Returns dict {suffix: (num_src,) tensor} with 'count', 'mean__c', 'max__c'.
+
+    NaN semantics match featuretools / SQL aggregates (verified by
+    test_dfs_parity.py): NaN values are SKIPPED — mean is
+    sum(non-NaN)/count(non-NaN), max is over non-NaN values only.
+    'count' counts neighbor ROWS (featuretools Count), not non-NaN
+    values. Empty aggregates (no valid neighbor values) are 0, matching
+    the pre-normalization fill used throughout.
     """
     out = {}
     ones = torch.ones_like(src, dtype=torch.float32)
     count = torch.zeros(num_src).scatter_add_(0, src, ones)
     out["count"] = count
-    safe = count.clamp_min(1.0)
     for c, colvals in values_by_feat.items():
         v = colvals[tar].to(torch.float32)
-        v = torch.nan_to_num(v, nan=0.0, posinf=0.0, neginf=0.0)
-        s = torch.zeros(num_src).scatter_add_(0, src, v)
-        out[f"mean__{c}"] = s / safe
+        valid = torch.isfinite(v)
+        v_zero = torch.where(valid, v, torch.zeros_like(v))
+        n_valid = torch.zeros(num_src).scatter_add_(
+            0, src, valid.to(torch.float32)
+        )
+        s = torch.zeros(num_src).scatter_add_(0, src, v_zero)
+        out[f"mean__{c}"] = s / n_valid.clamp_min(1.0)
+        v_neginf = torch.where(valid, v, torch.full_like(v, float("-inf")))
         m = torch.full((num_src,), float("-inf")).scatter_reduce_(
-            0, src, v, reduce="amax", include_self=True
+            0, src, v_neginf, reduce="amax", include_self=True
         )
         m[torch.isinf(m)] = 0.0
         out[f"max__{c}"] = m
@@ -330,7 +341,20 @@ def main():
     ]
     print(f"DFS over {len(types)} node types: {types}")
 
+    # Merge-with-existing so partial --nodetypes runs accumulate instead
+    # of clobbering earlier runs' metadata/name-embeddings.
     meta, all_parts, readable = {}, {}, {}
+    if osp.exists(osp.join(dfsdir, "metadfs.yaml")):
+        with open(osp.join(dfsdir, "metadfs.yaml")) as f:
+            meta = yaml.safe_load(f) or {}
+        for nt in types:
+            meta.pop(nt, None)   # recomputed below
+    existing_nameemb = {}
+    if osp.exists(osp.join(dfsdir, "dfsfeatnameemb.pt")):
+        existing_nameemb = torch.load(
+            osp.join(dfsdir, "dfsfeatnameemb.pt"),
+            map_location="cpu", weights_only=True,
+        )
     d1_store = {}
 
     # ── Pass 1: depth 1 for every type ──
@@ -386,7 +410,8 @@ def main():
     stage2 = {n: p for n, p in all_parts.items() if n not in d1_names}
     dfs2_embs = build_nameemb(stage2, graph, dfs1_embs, args.emb_dim,
                               args.nomic, {n: readable[n] for n in stage2})
-    torch.save({**dfs1_embs, **dfs2_embs}, osp.join(dfsdir, "dfsfeatnameemb.pt"))
+    torch.save({**existing_nameemb, **dfs1_embs, **dfs2_embs},
+               osp.join(dfsdir, "dfsfeatnameemb.pt"))
 
     with open(osp.join(dfsdir, "metadfs.yaml"), "w") as f:
         yaml.dump(meta, f)

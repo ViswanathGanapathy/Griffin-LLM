@@ -144,6 +144,49 @@ it. Reimplementing natively (~200 lines, torch scatter ops) avoids a
 DataFrame round-trip and a new dependency while keeping semantics
 identical to fastdfs `max_depth∈{1,2}` with cutoff times.
 
+## 4b. Semantics vs featuretools / fastdfs (verified parity + deliberate deviations)
+
+`test_dfs_parity.py` runs a two-phase numerical parity test against
+**real featuretools** (isolated venv, so the griffin env is untouched):
+a synthetic users←orders←items RDB with 25% NaNs and per-row temporal
+cutoffs, comparing Count / Mean / Max at depth 1 and Mean-of-Mean at
+depth 2. Status: **all aggregates match featuretools 1.31.0** to
+float32 precision (max|Δ| ≈ 2e-6).
+
+Verified-identical semantics:
+
+| Aspect | featuretools / fastdfs (SQL) | Ours |
+|---|---|---|
+| Mean with NULLs | skip NULLs (`sum/count` over non-null) | same (fixed — early version zero-filled, biasing means toward 0) |
+| Max with NULLs | skip NULLs | same (fixed — early version mapped NaN→0, corrupting all-negative columns) |
+| Count | counts rows | same |
+| Depth-2 shape | agg of child's agg (e.g. `MEAN(orders.MEAN(items.price))`) | same |
+| Empty aggregate | NaN → caller-imputed | 0 before z-normalization |
+
+Deliberate deviations (each documented and defensible):
+
+1. **Cutoff inclusivity.** featuretools includes rows at
+   `time <= cutoff`; we use strict `nb_ts < node_ts` (Griffin's
+   `getedge` mask). Strict is safer against same-timestamp label
+   leakage; the parity test aligns them via `cutoff = ts − 1s`.
+2. **Depth-2 temporal window.** featuretools recomputes the whole
+   feature tree at the *target's* cutoff; we aggregate each neighbor's
+   *precomputed* d1 (each at the neighbor's own timestamp). Since
+   `nb_ts < node_ts`, the neighbor's window is a subset of the
+   target's — ours is strictly more conservative, and precomputable
+   per node. On non-temporal data the two coincide (verified in the
+   parity test).
+3. **Primitive set.** count/mean/max only at d1, mean-only at d2 (vs
+   featuretools' default sum/std/skew/min/mode/… and transform
+   primitives) — the explosion-control choice from §3.
+4. **Direct features.** featuretools copies parent attributes across
+   many-to-one relations as "direct features"; our mean over a
+   singleton neighbor set equals the same copy (plus a constant
+   count=1), so these are subsumed, with mild redundancy.
+5. **No cross-library code reuse.** The implementation is native
+   (torch scatter over Griffin's Arrow/CSR structures) — see §4's
+   "Why not call fastdfs directly?".
+
 ## 5. Backward compatibility
 
 - `dfs_depth=0` / `dfs_fewshot_depth=0` (defaults) → bit-identical to
