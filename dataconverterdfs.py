@@ -61,8 +61,16 @@ def sanitize(relname: str) -> str:
 
 
 def primitive_tag(name: str, dim: int) -> torch.Tensor:
-    """Deterministic pseudo-random unit vector for an aggregation primitive."""
-    g = torch.Generator().manual_seed(abs(hash(name)) % (2**31))
+    """Deterministic pseudo-random unit vector for an aggregation primitive.
+
+    Seeded by a content hash (md5), NOT Python's built-in hash() — the
+    latter is salted per process (PYTHONHASHSEED), which would make
+    name embeddings differ across converter runs and silently unbind
+    checkpoints from regenerated artifacts.
+    """
+    import hashlib
+    seed = int.from_bytes(hashlib.md5(name.encode()).digest()[:4], "little")
+    g = torch.Generator().manual_seed(seed)
     v = torch.randn(dim, generator=g)
     return v / v.norm()
 
