@@ -11,7 +11,10 @@ Everything needed is on the `smpnn-ablations` branch of
 [DFS_INTEGRATION_WALKTHROUGH.md](DFS_INTEGRATION_WALKTHROUGH.md) (code
 review guide), [DFS_GRIFFIN_DESIGN.md](DFS_GRIFFIN_DESIGN.md) (design +
 leakage rules), [GRIFFIN_ARCHITECTURE_EVOLUTION.md](GRIFFIN_ARCHITECTURE_EVOLUTION.md)
-(all four architecture stages).
+(all four architecture stages), and
+[COMMERCE_DFS_RUNBOOK.md](COMMERCE_DFS_RUNBOOK.md) (concrete
+commerce-1 → commerce-2 instructions: Step-0 artifact conversion,
+vanilla-Griffin training, TabICL v2 evaluation).
 
 ---
 
