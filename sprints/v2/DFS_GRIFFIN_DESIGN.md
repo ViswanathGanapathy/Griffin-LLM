@@ -68,14 +68,29 @@ mechanism as Step 1; the only extra care is masking (below).
 
 ## 3. Correctness rules (where naive DFS breaks)
 
-1. **Temporal leakage.** DFS features are computed at each node's own
-   timestamp with a **strict `<` cutoff** — a neighbor row is included
-   iff `nb_ts < node_ts`. Implementation reuses Griffin's existing
+1. **Temporal leakage.** DFS features are evaluated at the **query
+   cutoff τ** — the task timestamp of the seed a row was reached from —
+   with a **strict `<` filter**: a neighbor row is included iff
+   `nb_ts < τ`. τ is propagated to every depth (fastdfs / featuretools
+   `cutoff_time` semantics). Implementation reuses Griffin's existing
    `getedge` timestamp mask (`adj.masked_fill_(adjtimestamp >= timestamp, -1)`),
-   which is exactly this rule. Strict inequality also excludes
-   same-timestamp rows (including, transitively, the row itself).
-   Non-temporal node types (all timestamps = int64-min) skip the
-   cutoff.
+   the same mask the MPNN sampler uses, so the exact DFS summary and
+   the sampled neighborhood always describe the same temporal window.
+   The precomputed store holds *own-timestamp* values and is used only
+   when it is provably identical to the τ evaluation (cutoff is None,
+   or the type is temporal and τ equals every row's own timestamp —
+   Completion pretraining and the many RelBench tasks whose cutoff IS
+   the row time); otherwise features are computed online at τ and
+   z-normalized with dedicated cutoff-mode stats (`d1_at`/`d2_at`,
+   fitted at sampled task cutoffs via `--cutoff_stats`).
+   **Non-temporal node types never skip the cutoff for supervised
+   tasks** — that was the original leak (a driver's all-history
+   aggregates include the evaluation window). They fall back to
+   all-time only when no query time exists at all (Completion-style
+   `cutoff=None`), where the label is a present cell, not future
+   information. Label-holder (`is_target`) relations are excluded from
+   DFS sources by default (`--include_target_rels` to opt in, refused
+   without `--cutoff_stats`).
 
 2. **Depth-2 self-leakage (A→B→A backtracking).** When aggregating
    B's depth-1 features into A, features of B that were derived from
@@ -169,13 +184,18 @@ Deliberate deviations (each documented and defensible):
    `time <= cutoff`; we use strict `nb_ts < node_ts` (Griffin's
    `getedge` mask). Strict is safer against same-timestamp label
    leakage; the parity test aligns them via `cutoff = ts − 1s`.
-2. **Depth-2 temporal window.** featuretools recomputes the whole
-   feature tree at the *target's* cutoff; we aggregate each neighbor's
-   *precomputed* d1 (each at the neighbor's own timestamp). Since
-   `nb_ts < node_ts`, the neighbor's window is a subset of the
-   target's — ours is strictly more conservative, and precomputable
-   per node. On non-temporal data the two coincide (verified in the
-   parity test).
+2. **Depth-2 temporal window — temporal hubs only.** featuretools
+   recomputes the whole feature tree at the *target's* cutoff; for a
+   **temporal** hub we aggregate the hub's *precomputed* own-timestamp
+   d1. Since `ts(hub) < τ`, the hub's window is a subset of the
+   target's — strictly conservative, never leaky, and free to look up.
+   A **non-temporal** hub (a dimension row) has no own timestamp; its
+   precomputed d1 would be all-time and leak the future straight
+   through the dimension table, so it is **recomputed at the querying
+   row's cutoff** (`compute_d2_at`, deduplicated over unique
+   (hub, cutoff) pairs with a budget guard; `--d2_nontemporal_hubs
+   skip` zero-fills instead — it never falls back to the all-time
+   value).
 3. **Primitive set.** count/mean/max only at d1, mean-only at d2 (vs
    featuretools' default sum/std/skew/min/mode/… and transform
    primitives) — the explosion-control choice from §3.

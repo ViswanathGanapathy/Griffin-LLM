@@ -15,6 +15,25 @@ leakage rules), [GRIFFIN_ARCHITECTURE_EVOLUTION.md](GRIFFIN_ARCHITECTURE_EVOLUTI
 
 ---
 
+> **⚠ Cutoff-time fix (2026-08-23) — earlier DFS results are invalid as
+> evidence.** DFS artifacts generated before format v2 were evaluated
+> at each row's own timestamp, with *no* cutoff for non-temporal root
+> types — aggregating the evaluation window (and, potentially, label
+> relations) into the features. Any E1/E2/E3 checkpoint trained on v1
+> artifacts measures a partially leaked signal; treat those numbers as
+> an "E-leaky" row only. Before running any DFS cell:
+>
+> ```bash
+> python dataconverterdfs.py datasets/joint-v65 \
+>     --nodetypes <types...> --cutoff_stats --tasks <tasks...>
+> ```
+>
+> `--cutoff_stats` is a **prerequisite** for supervised-task training:
+> it fits the cutoff-mode normalization stats (`d1_at`/`d2_at`) the
+> online path needs; the loader refuses to serve task cutoffs without
+> them. The measured leakage (E-leaky − E-fixed, same seeds) is itself
+> a result worth reporting. See DFS_INTEGRATION_WALKTHROUGH.md §0a.
+
 ## 1. The configuration matrix
 
 | # | Tag | Backbone | `--dfs_fewshot_depth` | `--dfs_root_depth` | Extra backbone flags |

@@ -1690,6 +1690,12 @@ def main(args):
         )
     _n_params = sum(p.numel() for p in model.parameters())
     print(f"[Params] Griffin total={_n_params:,}")
+    # C10: refuse to evaluate/warm-start under DFS flags that differ from
+    # what the checkpoint was trained with (silently wrong otherwise).
+    import dfscore as _dfscore
+    _dfscore.check_dfs_config(args.loadpath, args,
+                              override=getattr(args, "dfs_override", False))
+    _dfscore.write_dfs_config(args.savepath, args)
     if args.loadpath is not None:
         # When --use_smpnn + vanilla checkpoint, the SMPNN-only params
         # (ln_gnn, ln_ff, alpha_gnn, alpha_ff) won't be in the checkpoint
@@ -1782,6 +1788,10 @@ def main(args):
     # ── Data loading ──
     graph = Graph(args.dataset)
     task = Task(args.dataset)
+    if getattr(args, "dfs_root_depth", 0) > 0 or getattr(args, "dfs_fewshot_depth", 0) > 0:
+        # Load DFS artifacts once in the main process so DataLoader workers
+        # inherit them by fork instead of each re-reading them per epoch.
+        graph.load_dfs()
 
     # Audit prompts vs task metadata once on rank 0
     if accelerator.is_main_process:
@@ -2633,6 +2643,11 @@ if __name__ == "__main__":
                         help="Append precomputed DFS aggregate columns to the "
                              "hop-0 fewshot leaves (0 = off; 1 recommended). "
                              "Must match the training setting.")
+    parser.add_argument("--dfs_override", action="store_true", default=False,
+                        help="Proceed even if --loadpath's recorded DFS flags "
+                             "differ from the current ones (otherwise an "
+                             "error — the column set is part of the input "
+                             "contract).")
     parser.add_argument("--use_rev", type=str2bool, default=True)
     parser.add_argument("--use_gate", type=str2bool, default=True)
     parser.add_argument("--use_smpnn", action="store_true", default=False,

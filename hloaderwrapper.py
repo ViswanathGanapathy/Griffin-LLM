@@ -257,6 +257,18 @@ class LoaderWrapper:
         # aggregate summary of each leaf's neighborhood, appended as extra
         # feature columns — neighborhood context without graph expansion.
         tmpargs["dfs_depth"] = self.dfs_fewshot_depth
+        # DFS cutoff for ICL example leaves. A temporal leaf carries its
+        # outcome at its own row time; aggregates evaluated at the seed's
+        # (usually later) cutoff would fold in events downstream of that
+        # visible outcome, making the example incoherent as a
+        # "(features as of t, outcome)" pair. So temporal types use the
+        # leaf's own timestamp (which also hits the precomputed store).
+        # Non-temporal types keep the seed's task cutoff: the leaf has no
+        # time of its own, and "this entity as of the query time" is the
+        # only leak-free snapshot.
+        if (timestamp is not None and self.dfs_fewshot_depth > 0
+                and self.graph.dfs_is_temporal(nodetype)):
+            timestamp = self.graph.nodes[nodetype].feat[ind]["timestamp"]
         return self.graph.subgraph(nodetype, ind, **tmpargs, timestamp=timestamp)
 
     def fewshotroot(self, rootnodetype, tind, taskmask, roottimestamp=None):
@@ -425,6 +437,18 @@ class LoaderWrapperTask(LoaderWrapper):
             assert y.shape[1] == 1
             y = y.squeeze_(1)
         
+        if tasktimestamp is None and (
+                self.subgraphargs.get("dfs_depth", 0) > 0
+                or self.dfs_fewshot_depth > 0):
+            # Without a task cutoff, DFS for a non-temporal root would fall
+            # back to the all-time store — aggregating the evaluation window
+            # into the features. Refuse rather than leak.
+            raise RuntimeError(
+                f"Task {taskname} has no timestamps but DFS features are "
+                f"enabled (dfs_root_depth/dfs_fewshot_depth > 0). DFS on a "
+                f"supervised task requires task cutoffs."
+            )
+
         node, adj, nodenameemb, edgenameemb, mapping = self.subgraph(rootnodetype, tind, tasktimestamp)
         #node[nodetype] = node[nodetype][:, target_feat_mask]
         #nodenameemb[nodetype] = nodenameemb[nodetype][target_feat_mask]

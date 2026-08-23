@@ -9,7 +9,7 @@ Two phases, so featuretools never touches the griffin env:
   Phase A (griffin env, torch):
       python test_dfs_parity.py --phase a --out /tmp/dfs_parity
     Builds the synthetic RDB (seeded), runs the ACTUAL aggregate_batch
-    from dataconverterdfs.py with the strict-past rule, dumps
+    from dfscore.py with the strict-past rule, dumps
     ours.json + the raw tables as CSV.
 
   Phase B (venv with featuretools + pandas, NO torch):
@@ -67,7 +67,7 @@ def build_tables():
 
 def phase_a(outdir):
     import torch
-    from dataconverterdfs import aggregate_batch
+    from dfscore import aggregate_batch
 
     users, orders, items = build_tables()
     os.makedirs(outdir, exist_ok=True)
@@ -90,13 +90,13 @@ def phase_a(outdir):
             tar_list.append(oid)
     src = torch.tensor(src_list, dtype=torch.int64)
     tar = torch.tensor(tar_list, dtype=torch.int64)
-    vals = {"amount": torch.tensor(orders["amount"])}
+    vals = {"amount": torch.tensor(orders["amount"])[tar]}
     d1_users = aggregate_batch(src, tar, vals, N_USERS)
 
     # ── depth 1: orders <- items (non-temporal) ──
     src_o = torch.tensor(items["order_id"], dtype=torch.int64)
     tar_i = torch.tensor(np.arange(N_ITEMS), dtype=torch.int64)
-    vals_i = {"price": torch.tensor(items["price"])}
+    vals_i = {"price": torch.tensor(items["price"])[tar_i]}
     d1_orders = aggregate_batch(src_o, tar_i, vals_i, N_ORDERS)
 
     # ── depth 2: users <- orders <- items, MEAN of order's MEAN(price)

@@ -31,6 +31,45 @@ dataconverterdfs.py              hmaintask_combine*.py  (flags)
                                               └─ hmodel*.py  (UNCHANGED)
 ```
 
+### 0a. Cutoff-time fix (2026-08-23) — supersedes own-timestamp wording below
+
+A collaborator review (DFS_CUTOFF_FIX_SPEC.md) found that evaluating
+DFS at each row's *own* timestamp — with *no* cutoff for non-temporal
+types — leaks the evaluation window: RelBench entity tasks root at
+non-temporal tables (drivers, customer, user) whose task timestamp τ is
+external, so the stored aggregates covered all history (verified
+empirically: 62/64 future rows in one driver's stored d1). The fix,
+now on this branch (artifact format v2):
+
+* **DFS is evaluated at the query cutoff τ**, propagated to every
+  depth (fastdfs/featuretools `cutoff_time` semantics). `Graph.subgraph`
+  tracks a per-row cutoff (`nodecutoff`) mirroring node accumulation —
+  root-type rows reached at hop 2 inherit the τ of the seed they came
+  from — and passes it to `getdfsfeat(..., cutoff=...)`.
+* The **precomputed store** (now RAW, normalized at read time) is used
+  only when provably identical: `cutoff is None`, or the type is
+  temporal and τ equals every row's own timestamp. Otherwise features
+  are **computed online** (`dfscore.compute_d1_at`/`compute_d2_at`,
+  deduplicated over unique (row, cutoff) pairs) and z-normalized with
+  cutoff-mode stats (`d1_at`/`d2_at`, fitted by `--cutoff_stats`).
+* **Depth-2 hubs:** temporal hub → its own-ts store d1 (window ⊂
+  τ-window, conservative); non-temporal hub → recomputed at the
+  querying row's τ (dedup + budget; `skip` zero-fills, never all-time).
+* **Fewshot leaves:** temporal root type → leaf's own timestamp (a
+  coherent "(features as of t, outcome)" ICL pair; hits the store);
+  non-temporal root type → seed's τ (the only leak-free snapshot).
+* **Label relations** (`is_target` tails) are dropped from DFS sources
+  by default.
+* **Guards:** mixed INT64_MIN cutoffs raise; all-INT64_MIN (Completion
+  on a non-temporal type — "no query time exists") resolves to the
+  all-time store; a supervised task without timestamps refuses to run
+  with DFS enabled; artifact format/layout drift and checkpoint↔flag
+  mismatches (`dfs_config.json`) fail fast.
+
+Sections below that say "computed at each node's own timestamp"
+describe the store's contents, not the values a task batch sees.
+Covering tests: T7, T9–T14 in test_dfs_vanilla.py.
+
 ### 0b. Where DFS and the MPNN updates combine
 
 DFS and native message passing ARE combined — at the
@@ -264,13 +303,19 @@ unchanged vs `dfs_fewshot_depth=0`).
 `2 → 35` columns (2 native + 33 d1); `adj == {}` at hop 0 (T2).
 
 **Leakage question a reviewer must ask:** does a leaf's DFS summary
-contain anything the target row shouldn't see? A leaf's d1 was
-computed at *the leaf's own timestamp*, and the leaf itself was
-sampled from the target's strict past (`Graph.fewshot`,
-[hdataset.py:382+](../../hdataset.py#L382)). So the leaf's aggregates
-cover a window that ends before the leaf's own time, which precedes
-the target's time. Windows are nested; no future information reaches
-the target.
+contain anything the target row shouldn't see? After the cutoff fix
+(§0a) the rule lives in `LoaderWrapper.fewshotsubgraph`: a **temporal**
+leaf is evaluated at *its own timestamp* (its visible outcome belongs
+to that time; aggregating past it would fold the outcome's
+consequences into the example — covered by T13), and its window ends
+before its own time, which the fewshot sampler keeps in the seed's
+strict past — windows nested, no future reaches the target. A
+**non-temporal** leaf (drivers-style dimension row) is evaluated at
+*the seed's task cutoff τ* (T11): it has no time of its own, carries
+no label (RelBench labels live on holder nodes a hop-0 subgraph never
+includes), and "this entity as of the query time" is the only
+leak-free snapshot — the previous all-time store value leaked the
+evaluation window.
 
 ## 4. Path B — root nodes (`--dfs_root_depth`)
 

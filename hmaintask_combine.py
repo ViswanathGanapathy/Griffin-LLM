@@ -147,6 +147,12 @@ def main(args):
     n_params = sum(p.numel() for p in model.parameters())
     n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"[Params] Griffin total={n_params:,} trainable={n_trainable:,}")
+    # C10: bind the DFS input contract to the checkpoint directory, and
+    # refuse to warm-start from a checkpoint trained under different flags.
+    import dfscore as _dfscore
+    _dfscore.check_dfs_config(args.loadpath, args,
+                              override=getattr(args, "dfs_override", False))
+    _dfscore.write_dfs_config(args.savepath, args)
     if args.loadpath is not None:
         accelerate.load_checkpoint_in_model(model, args.loadpath)
     # model.reset_parameters()
@@ -155,6 +161,10 @@ def main(args):
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd)
     graph = Graph(args.dataset)
     task = Task(args.dataset)
+    if getattr(args, "dfs_root_depth", 0) > 0 or getattr(args, "dfs_fewshot_depth", 0) > 0:
+        # Load DFS artifacts once in the main process so DataLoader workers
+        # inherit them by fork instead of each re-reading them per epoch.
+        graph.load_dfs()
 
     tasknames = args.tasks
     if len(tasknames) == 1:
@@ -409,6 +419,11 @@ if __name__ == "__main__":
                              "hop-0 FEWSHOT leaves — one-hop neighborhood "
                              "context without graph expansion. 0 = off "
                              "(default); 1 recommended.")
+    parser.add_argument("--dfs_override", action="store_true", default=False,
+                        help="Proceed even if --loadpath's recorded DFS flags "
+                             "differ from the current ones. The mismatch "
+                             "otherwise errors, because the DFS column set is "
+                             "part of the encoder's input contract.")
     parser.add_argument("--use_rev", type=str2bool, default=True)
     parser.add_argument("--use_gate", type=str2bool, default=True)
     parser.add_argument("--use_smpnn", action="store_true", default=False,
