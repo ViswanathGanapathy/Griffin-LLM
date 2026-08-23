@@ -32,9 +32,12 @@ export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:Tr
 SEEDS=${SEEDS:-"42 43 44"}
 CELLS=${CELLS:-"E0 E1 E2 E3"}
 BACKBONES=${BACKBONES:-"smpnn vanilla"}
+# Task family to TRAIN on: others-1 | others-2 | commerce-1 | commerce-2
+# (resolved via task_names.yaml by hmaintask_combine.py)
+TRAIN_FAMILY=${TRAIN_FAMILY:-others-1}
 FORCE=${FORCE:-0}
 
-LOGDIR="logs/smpnn-dfs"
+LOGDIR="logs/smpnn-dfs-${TRAIN_FAMILY}"
 mkdir -p "$LOGDIR"
 
 if [ ! -f "datasets/joint-v65/dfs/metadfs.yaml" ]; then
@@ -62,6 +65,7 @@ backbone_flags() {
 run_one() {
     local CELL=$1 DFS_FS=$2 DFS_ROOT=$3 BACKBONE=$4 SEED=$5
     local TAG="s${SEED}-${CELL}-${BACKBONE}"
+    [ "$TRAIN_FAMILY" != "others-1" ] && TAG="${TRAIN_FAMILY}-${TAG}"
     local SAVE_PATH="checkpoints/smpnn-dfs-${TAG}"
     local CELL_LOG="${LOGDIR}/${TAG}.log"
 
@@ -87,7 +91,7 @@ run_one() {
 
     PYTHONUNBUFFERED=1 accelerate launch hmaintask_combine.py \
         datasets/joint-v65 logs/smpnn-dfs-${TAG} smpnn-dfs-${TAG} \
-        --tasks others-1 \
+        --tasks ${TRAIN_FAMILY} \
         --seed ${SEED} \
         $(backbone_flags $BACKBONE) \
         --dfs_fewshot_depth ${DFS_FS} --dfs_root_depth ${DFS_ROOT} \

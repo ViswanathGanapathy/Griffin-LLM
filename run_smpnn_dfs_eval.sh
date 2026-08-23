@@ -22,6 +22,11 @@ SEEDS=${SEEDS:-"42 43 44"}
 CELLS=${CELLS:-"E0 E1 E2 E3"}
 BACKBONES=${BACKBONES:-"smpnn vanilla"}
 EVAL_FAMILY=${EVAL_FAMILY:-others-2}
+# Family the checkpoints were TRAINED on (must match run_smpnn_dfs.sh's
+# TRAIN_FAMILY; others-1 keeps the historical unprefixed tag).
+TRAIN_FAMILY=${TRAIN_FAMILY:-others-1}
+CKPT_PREFIX=""
+[ "$TRAIN_FAMILY" != "others-1" ] && CKPT_PREFIX="${TRAIN_FAMILY}-"
 TABPFN_VERSION=${TABPFN_VERSION:-v3}   # v2.5 | v2.6 | v3 (see DFS_ABLATION_PLAN.md)
 REUSE_E0=${REUSE_E0:-1}
 FORCE=${FORCE:-0}
@@ -53,7 +58,7 @@ cell_is_complete() {
 
 eval_one() {
     local CELL=$1 DFS_FS=$2 DFS_ROOT=$3 BACKBONE=$4 SEED=$5
-    local TAG="s${SEED}-${CELL}-${BACKBONE}-$(echo $EVAL_FAMILY | tr -d '-')-tabpfn$(echo $TABPFN_VERSION | tr -d '.')"
+    local TAG="${CKPT_PREFIX}s${SEED}-${CELL}-${BACKBONE}-$(echo $EVAL_FAMILY | tr -d '-')-tabpfn$(echo $TABPFN_VERSION | tr -d '.')"
     local CELL_LOG="${EVAL_LOGDIR}/${TAG}.log"
 
     local found=0
@@ -64,7 +69,7 @@ eval_one() {
     [ "$found" = "0" ] && return
 
     # Checkpoint resolution (E0/vanilla may reuse the multiseed baseline)
-    local CKPT="checkpoints/smpnn-dfs-s${SEED}-${CELL}-${BACKBONE}/best_checkpoint"
+    local CKPT="checkpoints/smpnn-dfs-${CKPT_PREFIX}s${SEED}-${CELL}-${BACKBONE}/best_checkpoint"
     if [ "$CELL" = "E0" ] && [ "$BACKBONE" = "vanilla" ] && [ "$REUSE_E0" = "1" ] && [ ! -d "$CKPT" ]; then
         CKPT="checkpoints/smpnn-multiseed-s${SEED}-others-1-c1-vanilla-4/best_checkpoint"
     fi
