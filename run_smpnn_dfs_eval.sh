@@ -28,6 +28,11 @@ TRAIN_FAMILY=${TRAIN_FAMILY:-others-1}
 CKPT_PREFIX=""
 [ "$TRAIN_FAMILY" != "others-1" ] && CKPT_PREFIX="${TRAIN_FAMILY}-"
 TABPFN_VERSION=${TABPFN_VERSION:-v3}   # v2.5 | v2.6 | v3 (see DFS_ABLATION_PLAN.md)
+# ICL head: tabpfn (default) or tabicl. TabICL classification tasks use
+# the checkpoint alias below; regression tasks use tabicl's own default
+# regressor weights (per-task TabICLHead handles the split automatically).
+ICL_HEAD=${ICL_HEAD:-tabpfn}
+TABICL_VERSION=${TABICL_VERSION:-v2}
 REUSE_E0=${REUSE_E0:-1}
 FORCE=${FORCE:-0}
 
@@ -58,7 +63,9 @@ cell_is_complete() {
 
 eval_one() {
     local CELL=$1 DFS_FS=$2 DFS_ROOT=$3 BACKBONE=$4 SEED=$5
-    local TAG="${CKPT_PREFIX}s${SEED}-${CELL}-${BACKBONE}-$(echo $EVAL_FAMILY | tr -d '-')-tabpfn$(echo $TABPFN_VERSION | tr -d '.')"
+    local HEADTAG="tabpfn$(echo $TABPFN_VERSION | tr -d '.')"
+    [ "$ICL_HEAD" = "tabicl" ] && HEADTAG="tabicl$(echo $TABICL_VERSION | tr -d '.')"
+    local TAG="${CKPT_PREFIX}s${SEED}-${CELL}-${BACKBONE}-$(echo $EVAL_FAMILY | tr -d '-')-${HEADTAG}"
     local CELL_LOG="${EVAL_LOGDIR}/${TAG}.log"
 
     local found=0
@@ -91,7 +98,8 @@ eval_one() {
 
     PYTHONUNBUFFERED=1 python hmaintask_combine_llm.py \
         datasets/joint-v65 logs/smpnn-dfs-eval-${TAG} smpnn-dfs-eval-${TAG} \
-        --head tabpfn \
+        --head ${ICL_HEAD} \
+        --tabicl_checkpoint_version ${TABICL_VERSION} \
         --tasks rel-f1-driver-position \
         --eval_tasks ${EVAL_FAMILY} \
         --loadpath $CKPT \
