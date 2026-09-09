@@ -1,4 +1,5 @@
 import yaml
+import math
 import os.path as osp
 import torch
 import torch.nn.functional as F
@@ -137,6 +138,9 @@ def edgename2head(edgename: str):
 class Graph:
 
     def __init__(self, path) -> None:
+        self.path = path
+        self._dfs = None  # lazy: {"meta", "feat": {(nt, depth): tensor}, "nameemb"}
+        self._dfs_cache = {}  # bounded memo for online (idx, cutoff) batches
         with open(osp.join(path, "metanode.yaml")) as f:
             metanode = yaml.safe_load(f)
         with open(osp.join(path, "metaadj.yaml")) as f:
@@ -175,6 +179,260 @@ class Graph:
             for nodetype in self.metanode
         }
 
+    DFS_FORMAT_VERSION = 2
+
+    def load_dfs(self):
+        """Lazily load precomputed DFS artifacts (see dataconverterdfs.py).
+
+        Stored values are RAW (unnormalized, counts log1p'd); normalization
+        is applied at read time so the stored and online-computed paths
+        produce identical numbers.
+        """
+        if self._dfs is not None:
+            return self._dfs
+        dfsdir = osp.join(self.path, "dfs")
+        metapath = osp.join(dfsdir, "metadfs.yaml")
+        if not osp.exists(metapath):
+            raise FileNotFoundError(
+                f"DFS features requested but {metapath} not found. "
+                f"Run: python dataconverterdfs.py {self.path}"
+            )
+        with open(metapath) as f:
+            meta = yaml.safe_load(f) or {}
+        version = meta.pop("__format__", 1)
+        if version != self.DFS_FORMAT_VERSION:
+            raise RuntimeError(
+                f"{metapath} is DFS artifact format v{version}, but this code "
+                f"requires v{self.DFS_FORMAT_VERSION}. v1 artifacts store "
+                f"z-normalized values computed at each row's own timestamp, "
+                f"which aggregates ALL history (including the test window) "
+                f"for non-temporal node types. Regenerate:\n"
+                f"    python dataconverterdfs.py {self.path} "
+                f"--cutoff_stats --tasks ALLTASK"
+            )
+        feat = {}
+        for nt in meta:
+            for depth in ("d1", "d2"):
+                p = osp.join(dfsdir, nt, f"{depth}.pt")
+                if depth in meta[nt] and osp.exists(p):
+                    feat[(nt, depth)] = torch.load(
+                        p, map_location="cpu", weights_only=True
+                    )
+        nameemb = torch.load(
+            osp.join(dfsdir, "dfsfeatnameemb.pt"),
+            map_location="cpu", weights_only=True,
+        )
+        self._dfs = {"meta": meta, "feat": feat, "nameemb": nameemb,
+                     "layouts": {}, "plans": {}}
+        return self._dfs
+
+    def _dfs_layout(self, nodetype: str):
+        """Rebuild a node type's d1 column layout and verify it still matches
+        the stored artifacts. A silent mismatch would rebind checkpoint
+        columns to different features."""
+        dfs = self.load_dfs()
+        if nodetype in dfs["layouts"]:
+            return dfs["layouts"][nodetype]
+        import dfscore
+        meta = dfs["meta"][nodetype]
+        a = meta.get("args", {})
+        layout = dfscore.build_d1_layout(
+            self, nodetype,
+            a.get("max_cols_per_rel", 8),
+            tuple(a.get("prims", dfscore.DEFAULT_PRIMS)),
+            a.get("include_target_rels", False),
+        )
+        stored = meta["d1"]["names"]
+        if layout["names"] != stored:
+            raise RuntimeError(
+                f"DFS layout for {nodetype} no longer matches its artifacts "
+                f"({len(layout['names'])} columns recomputed vs "
+                f"{len(stored)} stored). The dataset or dfscore changed since "
+                f"the artifacts were written; regenerate them."
+            )
+        dfs["layouts"][nodetype] = layout
+        return layout
+
+    def _dfs_plan(self, nodetype: str):
+        dfs = self.load_dfs()
+        if nodetype in dfs["plans"]:
+            return dfs["plans"][nodetype]
+        meta = dfs["meta"][nodetype]
+        plan = []
+        if "d2" in meta:
+            for (r, j), name in zip(meta["d2"]["plan"], meta["d2"]["names"]):
+                tail_layout = self._dfs_layout(edgename2tail(r))
+                plan.append((r, int(j), name, tail_layout["names"][int(j)]))
+        dfs["plans"][nodetype] = plan
+        return plan
+
+    def _dfs_raw(self, nodetype: str, depth: str):
+        return self.load_dfs()["feat"].get((nodetype, depth))
+
+    def dfs_is_temporal(self, nodetype: str) -> bool:
+        """Whether this node type has real per-row timestamps. Used by the
+        fewshot loader to decide a leaf's DFS cutoff (temporal type -> the
+        leaf's own timestamp; non-temporal -> the seed's task cutoff).
+        Artifact-independent: derived from the node table itself."""
+        import dfscore
+        return dfscore.is_temporal(self, nodetype)
+
+    def _dfs_own_timestamp(self, nodetype: str, idx: torch.Tensor):
+        ts = self.nodes[nodetype].feat["timestamp"]
+        if not torch.is_tensor(ts):
+            ts = torch.tensor(ts)
+        return ts[idx]
+
+    def _dfs_values(self, nodetype: str, idx: torch.Tensor, depths, cutoff):
+        """Raw (unnormalized) DFS columns for `idx` at `cutoff`, plus the
+        normalization stats that go with them.
+
+        Resolution:
+          1. cutoff is None, or cutoff equals every row's own timestamp
+             -> read the precomputed own-timestamp store. The equality case
+                covers Completion pretraining and every task whose cutoff IS
+                the row's timestamp (amazon-rating, seznam-*, retailrocket,
+                stackexchange-upvote, ...), which is also where the number of
+                distinct cutoffs makes precomputation hopeless.
+          2. otherwise -> compute online at the given cutoff. Exact for any
+             cutoff, and the only correct answer for a non-temporal root type,
+             whose stored value spans all history.
+        """
+        import dfscore
+        dfs = self.load_dfs()
+        meta = dfs["meta"][nodetype]
+
+        use_store = cutoff is None
+        if not use_store:
+            if not torch.is_tensor(cutoff):
+                cutoff = torch.as_tensor(cutoff, dtype=torch.int64)
+            cutoff = cutoff.to(torch.int64)
+            use_store = bool(
+                meta.get("temporal", True)
+                and torch.equal(cutoff, self._dfs_own_timestamp(nodetype, idx))
+            )
+            if not use_store:
+                sentinel = cutoff == dfscore.INT64_MIN
+                if sentinel.all():
+                    # Own timestamps of a non-temporal type (Completion-style
+                    # "no query time exists"). Computing online at INT64_MIN
+                    # would filter out every neighbor and silently return
+                    # all-zero features; the all-time store is the intended
+                    # semantics here.
+                    cutoff = None
+                    use_store = True
+                elif sentinel.any():
+                    raise RuntimeError(
+                        f"{nodetype}: {int(sentinel.sum())}/{len(cutoff)} "
+                        f"cutoffs are INT64_MIN mixed with real timestamps. "
+                        f"A task cutoff vector must not contain the "
+                        f"missing-timestamp sentinel."
+                    )
+
+        out = []
+        if use_store:
+            for d in depths:
+                raw = self._dfs_raw(nodetype, d)
+                if raw is None:
+                    continue
+                out.append((d, raw[idx], meta[d]["mean"], meta[d]["std"]))
+            return out
+
+        # ── online path ──
+        for d in depths:
+            if d not in meta:
+                continue
+            stats = meta.get(f"{d}_at")
+            if stats is None:
+                raise RuntimeError(
+                    f"DFS features for {nodetype} were requested at a task "
+                    f"cutoff, but its artifacts carry no cutoff-mode "
+                    f"normalization stats ('{d}_at' in metadfs.yaml).\n"
+                    f"Reading the own-timestamp store instead would aggregate "
+                    f"all history"
+                    + ("" if meta.get("temporal", True) else
+                       f" — {nodetype} is non-temporal, so that store has no "
+                       f"cutoff at all and leaks the evaluation window")
+                    + f".\nRegenerate:\n    python dataconverterdfs.py "
+                    f"{self.path} --cutoff_stats --tasks ALLTASK"
+                )
+            out.append((d, self._dfs_compute(nodetype, idx, cutoff, d),
+                        stats["mean"], stats["std"]))
+        return out
+
+    def _dfs_compute(self, nodetype, idx, cutoff, depth):
+        """Online DFS for exactly the (row, cutoff) pairs asked for.
+
+        Deduplicates first: a subgraph batch reaches the same root-type row
+        from several seeds, and hop-2 expansion duplicates it further.
+        """
+        import dfscore
+        # exact bytes, not hash(): a hash collision would silently return
+        # another batch's features
+        key = (nodetype, depth,
+               idx.numpy().tobytes(), cutoff.numpy().tobytes())
+        cached = self._dfs_cache.get(key)
+        if cached is not None:
+            return cached
+
+        pairs, inv = torch.unique(
+            torch.stack((idx.to(torch.int64), cutoff), dim=1),
+            dim=0, return_inverse=True,
+        )
+        u_idx, u_cut = pairs[:, 0].contiguous(), pairs[:, 1].contiguous()
+        colsource = dfscore.RowGather(self)
+        layout = self._dfs_layout(nodetype)
+        if depth == "d1":
+            vals = dfscore.compute_d1_at(self, nodetype, u_idx, u_cut, layout,
+                                         colsource)
+        else:
+            meta = self.load_dfs()["meta"][nodetype]
+            layouts = {nodetype: layout}
+            for r, _, _, _ in self._dfs_plan(nodetype):
+                t = edgename2tail(r)
+                if t not in layouts:
+                    layouts[t] = self._dfs_layout(t)
+            vals = dfscore.compute_d2_at(
+                self, nodetype, u_idx, u_cut, self._dfs_plan(nodetype),
+                layouts, lambda t: self._dfs_raw(t, "d1"), colsource,
+                nontemporal_hubs=meta.get("args", {}).get(
+                    "d2_nontemporal_hubs", "recompute"),
+            )
+        vals = vals[inv]
+        if len(self._dfs_cache) >= 32:
+            self._dfs_cache.pop(next(iter(self._dfs_cache)))
+        self._dfs_cache[key] = vals
+        return vals
+
+    def getdfsfeat(self, nodetype: str, idx: torch.Tensor, depth: int, floatemb,
+                   cutoff=None):
+        """Embedded DFS columns for `idx` rows of `nodetype`, evaluated at
+        `cutoff`.
+
+        depth is cumulative: 1 -> d1 columns; 2 -> d1 + d2 columns.
+        cutoff: (B,) int64 query times, one per row — the task timestamp of
+            the seed each row was reached from. None means "no query time
+            exists", which falls back to the row's own timestamp.
+        Returns (feat (B, C_dfs, D), nameemb (C_dfs, D)) or (None, None)
+        if this node type has no DFS features (e.g. no relations).
+        """
+        import dfscore
+        dfs = self.load_dfs()
+        if nodetype not in dfs["meta"]:
+            return None, None
+        depths = ["d1"] if depth == 1 else ["d1", "d2"]
+        cols, names = [], []
+        for d, raw, mean, std in self._dfs_values(nodetype, idx, depths, cutoff):
+            vals = dfscore.apply_norm(raw, mean, std)  # (B, C_d) z-normed
+            for j, name in enumerate(dfs["meta"][nodetype][d]["names"]):
+                cols.append(floatemb(vals[:, j].contiguous()))  # (B, D)
+                names.append(name)
+        if not cols:
+            return None, None
+        feat = torch.stack(cols, dim=1)  # (B, C_dfs, D)
+        nameemb = torch.stack([dfs["nameemb"][n] for n in names], dim=0)
+        return feat, nameemb
+
     def subgraph(
         self,
         root_nodetype: str,
@@ -182,11 +440,36 @@ class Graph:
         hop: int,
         floatemb,
         fanout: int = INF,
+        fanout_decay: float = 1.0,
+        dfs_depth: int = 0,
         timestamp: Union[list[int], None] = None,
     ):
+        """Sample a subgraph rooted at ``root_nodeidx``.
+
+        Args:
+            fanout: maximum neighbours per (source-node, edge-type) at hop 0.
+                Set to ``INF`` for no cap (original behaviour).
+            fanout_decay: geometric per-hop shrink factor. Hop ``h`` uses
+                ``max(1, ceil(fanout * fanout_decay ** h))`` neighbours.
+                Default ``1.0`` -> identical to a constant fanout.
+                Ignored when ``fanout >= INF``.
+            dfs_depth: 0 (default) = off. 1 or 2 appends DFS aggregate
+                columns (see dataconverterdfs.py) to the ROOT node type's
+                features and column-name embeddings. Depth is cumulative
+                (2 = d1 + d2 columns). The columns are evaluated at
+                ``timestamp`` — the same query time this call samples the
+                MPNN neighborhood at — so the exact DFS summary and the
+                sampled subgraph describe the same temporal window. Every
+                root-type row carries the cutoff of the seed it was reached
+                from, including rows found at deeper hops.
+        """
+        assert fanout_decay > 0, (
+            f"fanout_decay must be > 0, got {fanout_decay}"
+        )
         hastimestamp: bool = timestamp is not None
         adj = {}
         node = {}
+        nodecutoff = {}
         root = {root_nodetype: root_nodeidx}
         roottimestamp = {root_nodetype: timestamp}
 
@@ -208,12 +491,20 @@ class Graph:
             return d
 
         for h in range(hop):
+            # Per-hop decaying fanout. Ring 0 uses the full `fanout`;
+            # each outer ring shrinks by `fanout_decay` (ceil, floored at 1).
+            # decay == 1.0 -> identical to a constant fanout.
+            # INF (no cap) stays uncapped.
+            if fanout >= INF:
+                hop_fanout = fanout
+            else:
+                hop_fanout = max(1, math.ceil(fanout * (fanout_decay ** h)))
             nroot, nroottimestamp = {}, {}
             for nodetype in root:
                 found_src_num = dictgetlen(node, nodetype)
                 # print(list(self.nodes.keys()), list(root.keys()), list(roottimestamp.keys()))
                 ttadj = self.nodes[nodetype].getedge(
-                    root[nodetype], fanout, roottimestamp[nodetype]
+                    root[nodetype], hop_fanout, roottimestamp[nodetype]
                 )
                 for edgetype in ttadj:
                     srcidx, taridx = ttadj[edgetype][0], ttadj[edgetype][1]
@@ -246,6 +537,10 @@ class Graph:
 
             for nodetype in root:
                 node = dictupdate(node, nodetype, root[nodetype])
+                if hastimestamp and roottimestamp.get(nodetype) is not None:
+                    nodecutoff = dictupdate(
+                        nodecutoff, nodetype, roottimestamp[nodetype]
+                    )
             del root
             del roottimestamp
             root = nroot
@@ -253,12 +548,19 @@ class Graph:
 
         for nodetype in root:
             node = dictupdate(node, nodetype, root[nodetype])
+            if hastimestamp and roottimestamp.get(nodetype) is not None:
+                nodecutoff = dictupdate(
+                    nodecutoff, nodetype, roottimestamp[nodetype]
+                )
 
         mapping = torch.arange(len(root_nodeidx), device=root_nodeidx.device)
         # not change, latter code depends on mapping == arange
 
+        dfs_root_idx = None
         for nodetype in node:
             assert len(node[nodetype]), f"{list(node.keys())} {root_nodeidx.shape} {list(adj.keys())}"
+            if dfs_depth > 0 and nodetype == root_nodetype:
+                dfs_root_idx = node[nodetype]  # raw indices, pre-replacement
             #unique_idx, inv = torch.unique(node[nodetype], return_inverse=True)
             #node[nodetype] = self.nodes[nodetype].getfeat(unique_idx, floatemb)[inv]
             node[nodetype] = self.nodes[nodetype].getfeat(node[nodetype], floatemb)
@@ -270,6 +572,29 @@ class Graph:
             )
             for nodetype in node
         }
+
+        # Append precomputed DFS aggregate columns to the root node type.
+        # Column attention is shape-agnostic, so downstream code (masks,
+        # scalefeat, the model) adapts automatically; loaders pad
+        # target_feat_mask for the extra columns.
+        if dfs_depth > 0 and dfs_root_idx is not None:
+            dfs_cutoff = nodecutoff.get(root_nodetype) if hastimestamp else None
+            if dfs_cutoff is not None:
+                assert dfs_cutoff.shape[0] == dfs_root_idx.shape[0], (
+                    f"cutoff/{root_nodetype} row misalignment: "
+                    f"{dfs_cutoff.shape[0]} vs {dfs_root_idx.shape[0]}"
+                )
+            dfsfeat, dfsnameemb = self.getdfsfeat(
+                root_nodetype, dfs_root_idx, dfs_depth, floatemb,
+                cutoff=dfs_cutoff,
+            )
+            if dfsfeat is not None:
+                node[root_nodetype] = torch.concat(
+                    (node[root_nodetype], dfsfeat), dim=1
+                )
+                nodenameemb[root_nodetype] = torch.concat(
+                    (nodenameemb[root_nodetype], dfsnameemb), dim=0
+                )
         # print("loader: ", len(node), len(adj), list(nodenameemb.keys()), list(edgenameemb.keys()))
 
         return node, adj, nodenameemb, edgenameemb, mapping

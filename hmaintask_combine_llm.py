@@ -1413,7 +1413,10 @@ def construct_dataset(graph, task, tasknames, split, args, floatembmodel):
         subgraphargs={
             "floatemb": floatembmodel,
             "fanout": args.fanout,
+            "fanout_decay": getattr(args, "fanout_decay", 1.0),
             "hop": args.hop,
+            "dfs_depth": getattr(args, "dfs_root_depth", 0),
+            "dfs_fewshot_depth": getattr(args, "dfs_fewshot_depth", 0),
         },
         shuffle=True if split == "train" else False,
         task=task,
@@ -1666,17 +1669,33 @@ def main(args):
             raise ImportError(
                 "--use_smpnn requested but hmodel_smpnn.py is not importable."
             )
-        print(f"[Griffin] Using SMPNN backbone (alpha_init={args.alpha_init})")
+        print(
+            f"[Griffin] Using SMPNN backbone (num_mp={args.num_mp}, "
+            f"alpha_init={args.alpha_init}, use_alpha={args.use_alpha}, "
+            f"use_ff={args.use_ff}, use_gnn_ln={args.use_gnn_ln}, "
+            f"use_attention={args.use_attention}, num_heads={args.num_heads})"
+        )
         model = _GriffinSMPNN(
             hiddim=args.hiddim, num_mp=args.num_mp,
             use_rev=args.use_rev, use_gate=args.use_gate,
             alpha_init=args.alpha_init,
+            use_attention=args.use_attention, num_heads=args.num_heads,
+            use_alpha=args.use_alpha, use_ff=args.use_ff,
+            use_gnn_ln=args.use_gnn_ln,
         )
     else:
         model = _GriffinVanilla(
             hiddim=args.hiddim, num_mp=args.num_mp,
             use_rev=args.use_rev, use_gate=args.use_gate,
         )
+    _n_params = sum(p.numel() for p in model.parameters())
+    print(f"[Params] Griffin total={_n_params:,}")
+    # C10: refuse to evaluate/warm-start under DFS flags that differ from
+    # what the checkpoint was trained with (silently wrong otherwise).
+    import dfscore as _dfscore
+    _dfscore.check_dfs_config(args.loadpath, args,
+                              override=getattr(args, "dfs_override", False))
+    _dfscore.write_dfs_config(args.savepath, args)
     if args.loadpath is not None:
         # When --use_smpnn + vanilla checkpoint, the SMPNN-only params
         # (ln_gnn, ln_ff, alpha_gnn, alpha_ff) won't be in the checkpoint
@@ -1769,6 +1788,10 @@ def main(args):
     # ── Data loading ──
     graph = Graph(args.dataset)
     task = Task(args.dataset)
+    if getattr(args, "dfs_root_depth", 0) > 0 or getattr(args, "dfs_fewshot_depth", 0) > 0:
+        # Load DFS artifacts once in the main process so DataLoader workers
+        # inherit them by fork instead of each re-reading them per epoch.
+        graph.load_dfs()
 
     # Audit prompts vs task metadata once on rank 0
     if accelerator.is_main_process:
@@ -2604,8 +2627,27 @@ if __name__ == "__main__":
     parser.add_argument("--num_mp", type=int, default=4)
     parser.add_argument("--hiddim", type=int, default=512)
     parser.add_argument("--fanout", type=int, default=10)
+    parser.add_argument("--fanout_decay", type=float, default=1.0,
+                        help="Geometric per-hop fanout shrink factor. "
+                             "1.0 (default) = constant fanout at every hop. "
+                             "Values in (0, 1) shrink outer rings, useful "
+                             "when --hop >= 4 to keep subgraphs tractable.")
     parser.add_argument("--fewshotfanout", type=int, default=3)
     parser.add_argument("--hop", type=int, default=2)
+    parser.add_argument("--dfs_root_depth", type=int, default=0, choices=[0, 1, 2],
+                        help="Append precomputed DFS aggregate columns to ROOT "
+                             "nodes (0 = off; run dataconverterdfs.py first). "
+                             "Must match the setting the checkpoint was "
+                             "trained with.")
+    parser.add_argument("--dfs_fewshot_depth", type=int, default=0, choices=[0, 1, 2],
+                        help="Append precomputed DFS aggregate columns to the "
+                             "hop-0 fewshot leaves (0 = off; 1 recommended). "
+                             "Must match the training setting.")
+    parser.add_argument("--dfs_override", action="store_true", default=False,
+                        help="Proceed even if --loadpath's recorded DFS flags "
+                             "differ from the current ones (otherwise an "
+                             "error — the column set is part of the input "
+                             "contract).")
     parser.add_argument("--use_rev", type=str2bool, default=True)
     parser.add_argument("--use_gate", type=str2bool, default=True)
     parser.add_argument("--use_smpnn", action="store_true", default=False,
@@ -2618,6 +2660,20 @@ if __name__ == "__main__":
                              "scaling. 1e-6 = near-identity init (paper "
                              "default). Increase for faster ramp-up if "
                              "training plateaus early.")
+    # SMPNN ablation flags. Must match the backbone training config so the
+    # checkpoint loads cleanly. Adding these here mirrors hmaintask_combine.py.
+    parser.add_argument("--use_attention", type=str2bool, default=False,
+                        help="SMPNN-B: enable parallel linear global attention "
+                             "(paper Appendix A).")
+    parser.add_argument("--num_heads", type=int, default=1,
+                        help="Number of attention heads when --use_attention.")
+    parser.add_argument("--use_alpha", type=str2bool, default=True,
+                        help="SMPNN-A2: enable learnable alpha scaling. "
+                             "False fixes alpha=1 on both sub-blocks.")
+    parser.add_argument("--use_ff", type=str2bool, default=True,
+                        help="SMPNN-A3: enable pointwise feedforward sub-block.")
+    parser.add_argument("--use_gnn_ln", type=str2bool, default=True,
+                        help="SMPNN-A4: enable Pre-LayerNorm before GNN.")
 
     # ── LLM-specific (only used when --head is llm or llm_mlp) ──
     parser.add_argument("--llm_model", type=str,

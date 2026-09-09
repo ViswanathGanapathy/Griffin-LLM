@@ -433,3 +433,131 @@ Griffin/
 └── README.md                    # This file (updated)
 ```
 
+---
+
+## SMPNN Extension (branch `smpnn-ablations`)
+
+This branch adds a **SMPNN-Griffin** variant that ports the DiT-style
+depth-scaling recipe to Griffin's heterogeneous relational MPNN,
+plus a **decaying-fanout subgraph sampler** that makes deeper stacks
+tractable in memory. Everything is fully backward compatible: if you
+never set `--use_smpnn` and leave `--fanout_decay 1.0` (the defaults),
+behaviour is identical to the original Griffin.
+
+### The SMPNN backbone
+
+A new file `hmodel_smpnn.py` defines `GriffinMod`, a Griffin encoder
+with per-layer affine LayerNorms, sequential graph→FFN sub-blocks,
+and a learnable α scalar on the FFN sub-block (initialised near
+zero for DiT-style identity init).
+
+Training flag: `--use_smpnn` routes to `hmodel_smpnn.py` instead of
+the original `hmodel.py`.
+
+| Flag | Values | Meaning |
+|---|---|---|
+| `--use_smpnn` | (bool) | Enable the SMPNN backbone. |
+| `--num_mp` | 4–8 | Number of MP layers. `6` is the sweet spot (Table B, paper). |
+| `--alpha_init` | `1e-6`, `1e-4`, `1e-2` | Initial value of the learnable α FFN residual scale. `1e-6` = paper default (D1); `1e-2` = warm-start optimised (D3). |
+| `--use_alpha` / `--use_ff` / `--use_gnn_ln` / `--use_attention` | (bool) | Ablation switches — see [ARCHITECTURE_VARIANTS](sprints/v2/ARCHITECTURE_VARIANTS.md). |
+| `--log_alpha_every N` | int | Print α values every N epochs (0 = off). |
+
+### Decaying-fanout subgraph sampler (NEW)
+
+When `num_mp ≥ 4`, the effective receptive field of the encoder
+exceeds `hop=2`, so a hop-2 subgraph does not fully use the deeper
+stack. Setting `hop = num_mp` gives the model its full receptive
+field but explodes subgraph size at constant fanout.
+
+`hdataset.py::Graph.subgraph()` now accepts a `fanout_decay` argument
+that geometrically shrinks the per-hop fanout:
+
+```
+hop_fanout(h) = max(1, ceil(fanout * fanout_decay ** h))
+```
+
+- `--fanout_decay 1.0` (default) — constant fanout at every hop.
+  **Identical to pre-existing behaviour** — no observable change on
+  legacy scripts.
+- `--fanout_decay 0.5` with `--fanout 20 --hop 6` — per-hop fanouts
+  `20, 10, 5, 3, 2, 1`. Inner rings preserve local context; outer
+  rings stay cheap.
+- `--fanout_decay 0.25` with `--fanout 20 --hop 6` — per-hop fanouts
+  `20, 5, 2, 1, 1, 1`. Aggressive shrink; recommended when GPU
+  memory is tight.
+
+Fewshot leaves are unaffected (they are sampled with `hop=0` in
+`hloaderwrapper.py::fewshotsubgraph`, so the decay loop never
+executes for them).
+
+The flag is wired through **all five** training and evaluation
+entrypoints: `hmaintask_combine.py`, `hmaintask_combine_llm.py`,
+`hmaintask_completion.py`,
+`hmaintask_downsample_absolute_eval_sample.py`, and
+`optuna_griffin_llm.py`.
+
+### Recommended combinations for common goals
+
+| Goal | Flags |
+|---|---|
+| Reproduce original Griffin | *(no new flags)* |
+| SMPNN paper default | `--use_smpnn --num_mp 6 --alpha_init 1e-6` |
+| SMPNN warm-start (paper headline) | `--use_smpnn --num_mp 6 --alpha_init 1e-2` |
+| Deep SMPNN with full receptive field | `--use_smpnn --num_mp 6 --alpha_init 1e-2 --hop 6 --fanout 20 --fanout_decay 0.5` |
+| Aggressive memory-saving deep run | `--use_smpnn --num_mp 6 --alpha_init 1e-2 --hop 6 --fanout 20 --fanout_decay 0.25 --batchsize 128` |
+
+### Full experiment recipes (all live on this branch)
+
+Wrapper shell scripts sit at the repo root; every script tees per-cell
+logs to `logs/<name>/` and skips completed cells via a checkpoint /
+`test_metric` line count check.
+
+| Script | What it does | Cost |
+|---|---|---|
+| `run_smpnn_multiseed_backbones.sh` | Train 20 backbones = 4 architectures × 5 seeds on `others-1`. Core paper artifact. | ~50 GPU-h |
+| `run_smpnn_multiseed_eval.sh` | Cross-task eval of the 20 backbones on the 5 headline transfer directions × 2 ICL heads. | ~2 GPU-h |
+| `run_smpnn_depth_native.sh` | Depth sweep L ∈ {2, 4, 6, 8} × Vanilla vs SMPNN, 3 seeds each. | ~20 GPU-h |
+| `run_smpnn_native_head_o1_o2.sh` | Native Griffin head on o1→o2 — sanity-check that the 7× variance reduction is a backbone property, not a TabPFN artefact. | ~1.7 GPU-h |
+| `run_smpnn_o1_o2_second_anchor.sh` | Second AUROC anchor (rel-trial-study-outcome) for o1→o2 with both TabPFN and TabICL. | ~3.3 GPU-h |
+| `run_smpnn_alpha_evolution.sh` + `parse_alpha_evolution.py` + `plot_alpha_evolution.py` | Re-train SMPNN-6 with per-epoch α logging enabled; extract CSV; produce two-panel log-scale plot showing α_gnn / α_ff trajectories per layer. | ~20–24 GPU-h |
+| `run_smpnn_fanout_decay.sh` (NEW) | Demonstrate the `--fanout_decay` flag: SMPNN-6 with `hop=2` (baseline) vs `hop=6, decay=0.5` (recommended) vs `hop=6, decay=0.25` (aggressive) — 3 seeds each. | ~30–40 GPU-h |
+| `run_smpnn_dfs.sh` (NEW) | DFS + MPNN hybrid matrix: E0 baseline / E1 fewshot-leaf DFS-1 / E2 root DFS-2 / E3 both, × {SMPNN-6, Vanilla-4} × 3 seeds. Requires `python dataconverterdfs.py datasets/joint-v65` first. | ~90 GPU-h |
+
+### DFS + MPNN hybrid (NEW)
+
+Inspired by RDBLearn (arXiv 2602.18495) and fastdfs
+(github.com/HKUSHXLab/fastdfs): precomputed Deep-Feature-Synthesis
+aggregates (count / mean / max per relation, strict past-only cutoff,
+no-backtrack at depth 2) are appended as extra **feature columns**, which
+Griffin's column-name-conditioned attention absorbs with **zero model
+changes** (existing checkpoints still load).
+
+```bash
+# 1. One-time offline computation (CPU-ok):
+python dataconverterdfs.py datasets/joint-v65
+
+# 2. Train with DFS-enriched fewshot leaves (one-hop neighborhood
+#    context for hop-0 leaves, no graph expansion):
+accelerate launch hmaintask_combine.py ... --dfs_fewshot_depth 1
+
+# 3. Train with two-hop DFS on root nodes (exact unsampled aggregates
+#    alongside the sampled MPNN):
+accelerate launch hmaintask_combine.py ... --dfs_root_depth 2
+
+# Eval MUST use the same dfs flags the checkpoint was trained with.
+```
+
+Design + leakage rules + registered predictions:
+[sprints/v2/DFS_GRIFFIN_DESIGN.md](sprints/v2/DFS_GRIFFIN_DESIGN.md).
+Experiment matrix: `run_smpnn_dfs.sh`.
+
+### Documentation
+
+- DFS + MPNN hybrid design: [sprints/v2/DFS_GRIFFIN_DESIGN.md](sprints/v2/DFS_GRIFFIN_DESIGN.md)
+- Extended technical report: [sprints/v2/GRIFFIN_SMPNN_PAPER_DRAFT.md](sprints/v2/GRIFFIN_SMPNN_PAPER_DRAFT.md)
+- LoG 2026 4-page draft: [sprints/v2/GRIFFIN_SMPNN_LOG_4PAGE.md](sprints/v2/GRIFFIN_SMPNN_LOG_4PAGE.md) + LaTeX bundle at [sprints/v2/log_2026_submission/](sprints/v2/log_2026_submission/)
+- Full multi-seed results readout: [sprints/v2/SMPNN_MASTER_RESULTS.md](sprints/v2/SMPNN_MASTER_RESULTS.md)
+- Architecture variant catalog: [sprints/v2/ARCHITECTURE_VARIANTS.md](sprints/v2/ARCHITECTURE_VARIANTS.md)
+- Data-conversion handoff for new collaborators: [sprints/v2/NEW_DATASET_HANDOFF.md](sprints/v2/NEW_DATASET_HANDOFF.md)
+- Multi-seed collaborator handoff: [sprints/v2/COLLABORATOR_HANDOFF.md](sprints/v2/COLLABORATOR_HANDOFF.md)
+
